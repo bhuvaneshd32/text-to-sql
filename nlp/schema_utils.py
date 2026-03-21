@@ -4,10 +4,9 @@ schema_utils.py
 Utilities for loading and serializing database schemas from Spider's tables.json.
 
 KEY OUTPUTS:
-    schema_dict  — JSON-serializable Python dict, used by Noor's MDP environment
+    schema_dict  — JSON-serializable Python dict, used by  MDP environment
     serialize_schema() — converts a db_id to a string you can concatenate with the NL question
 
-TELL NOOR:
     schema_dict format:
     {
         "employees": {

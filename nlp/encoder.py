@@ -121,7 +121,7 @@ class SchemaAwareEncoder(nn.Module):
         # schema tokens are. token_type_ids == 1 marks exactly those positions.
         # We use a boolean mask to gather them.
         #
-        # IMPORTANT NOTE FOR NOOR:
+        # Note:
         #   The number of schema tokens can vary between examples in a batch
         #   (different databases have different numbers of tables/columns).
         #   We use padding to make them the same length within a batch.
@@ -231,7 +231,7 @@ def tokenize_question_and_schema(
 
     # Log if this example was truncated (important to monitor!)
     total_tokens_needed = 1 + q_len + 1 + len(
-        tokenizer(schema_str, add_special_tokens=False)["input_ids"][0]
+        tokenizer(schema_str, add_special_tokens=False)["input_ids"]
     ) + 1
     if total_tokens_needed > max_length:
         print(f"[TRUNCATION WARNING] Example needs {total_tokens_needed} tokens "
