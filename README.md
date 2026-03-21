@@ -1,6 +1,6 @@
 # Text-to-SQL — Schema-Aware Execution-Grounded RL
 
-**Bhuvanesh D (22PD07) · ** &nbsp;|&nbsp; **Noor Fathima (22PD26) · **
+ Bhuvanesh D (22PD07) · &nbsp;|&nbsp; **Noor Fathima (22PD26) · 
 
 A hybrid Text-to-SQL system combining a Schema-Aware Transformer Encoder with
 Reinforcement Learning fine-tuning via PPO. Evaluated on the Spider benchmark.
