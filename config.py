@@ -8,11 +8,12 @@ import os
 
 # ─── Data paths ──────────────────────────────────────────────────
 # Point these to where you downloaded Spider
-SPIDER_ROOT        = os.environ.get("SPIDER_ROOT", "data/spider")
-TABLES_JSON        = os.path.join(SPIDER_ROOT, "tables.json")
-TRAIN_JSON         = os.path.join(SPIDER_ROOT, "train_spider.json")
-DEV_JSON           = os.path.join(SPIDER_ROOT, "dev.json")
-DB_DIR             = os.path.join(SPIDER_ROOT, "database")
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+SPIDER_ROOT = os.environ.get("SPIDER_ROOT", os.path.join(BASE_DIR, "data", "spider"))
+TABLES_JSON = os.path.join(SPIDER_ROOT, "tables.json")
+TRAIN_JSON  = os.path.join(SPIDER_ROOT, "train_spider.json")
+DEV_JSON    = os.path.join(SPIDER_ROOT, "dev.json")
+DB_DIR      = os.path.join(SPIDER_ROOT, "database")
 
 # ─── Model ───────────────────────────────────────────────────────
 ROBERTA_MODEL      = "roberta-base"
