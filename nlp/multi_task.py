@@ -36,7 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from encoder import SchemaAwareEncoder, HIDDEN_SIZE
+from nlp.encoder import SchemaAwareEncoder, HIDDEN_SIZE
 
 # ── label constants (must match data_pipeline.py) ────────────────
 TABLE  = 0

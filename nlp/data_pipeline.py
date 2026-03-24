@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 
-from schema_utils import load_schema_dict, serialize_schema
+from nlp.schema_utils import load_schema_dict, serialize_schema
 
 # ── label constants ───────────────────────────────────────────────
 TABLE   = 0

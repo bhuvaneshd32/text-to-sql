@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
-from schema_utils import serialize_schema
+from nlp.schema_utils import serialize_schema
 
 
 HIDDEN_SIZE = 768
