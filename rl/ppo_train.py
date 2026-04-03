@@ -144,7 +144,16 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
 
         partial  = normalize_sql(env.decode_sql(env.generated_tokens))
         mask     = env.fsm.get_mask(partial)
-
+        valid_count = mask.sum().item()
+        if valid_count < 5:
+            # FSM too restrictive — allow top-5 logits among valid tokens
+            # This preserves grammar constraints while allowing exploration
+            valid_logits = logits.clone()
+            valid_logits[~mask] = -1e9
+            top_valid = valid_logits.topk(min(5, int(valid_count))).indices
+            expanded_mask = mask.clone()
+            expanded_mask[top_valid] = True
+            mask = expanded_mask
         logits     = logits.float()
         vocab_size = logits.shape[0]
 
