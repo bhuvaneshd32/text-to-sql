@@ -620,6 +620,11 @@ if __name__ == "__main__":
     parser.add_argument("--temperature",    type=float, default=0.8)
     parser.add_argument("--eval_interval",  type=int,   default=5,
                         help="Evaluate every N PPO updates")
+    parser.add_argument("--alpha", type=float, default=1.0,
+                    help="Weight for R_exec")
+    parser.add_argument("--beta",  type=float, default=0.5, help="Weight for R_sem")
+    parser.add_argument("--gamma", type=float, default=0.1,help="Weight for R_eff")
+    parser.add_argument("--delta", type=float, default=0.3, help="Weight for R_counterfactual")
     parser.add_argument("--use_wandb",      action="store_true")
     args = parser.parse_args()
     train_ppo(args)

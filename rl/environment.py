@@ -202,17 +202,20 @@ class TextToSQLEnv:
             print("DB:", db_id)
 
         else:
-            # Shaped intermediate reward for structural milestones
-            # Gives PPO a signal before episode ends — critical for
-            # sparse reward problems like SQL generation
             shaped = 0.0
             prev_partial = normalize_sql(
                 self.decode_sql(self.generated_tokens[:-1])
             )
+            # Only reward FROM if it follows a real column, not just any token
             if "from" in new_partial and "from" not in prev_partial:
-                shaped += 0.05   # reached FROM — basic SQL structure
+                # Check at least one schema column was selected before FROM
+                has_col = any(
+                    col in prev_partial
+                    for col in self.fsm.columns
+                )
+                shaped += 0.05 if has_col else 0.01
             if "where" in new_partial and "where" not in prev_partial:
-                shaped += 0.05   # reached WHERE clause
+                shaped += 0.03
             reward = shaped
 
         return self.get_state(), reward, done, {}
