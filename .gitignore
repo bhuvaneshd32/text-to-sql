@@ -1,0 +1,59 @@
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────
+venv/
+env/
+.env/
+.venv/
+
+# ── Model checkpoints (large binary files — never commit these) ───
+checkpoints/*.pt
+checkpoints/*.bin
+nlp/checkpoints/*.pt
+nlp/checkpoints/*.bin
+*.pt
+*.bin
+# Keep the folder itself
+!checkpoints/.gitkeep
+
+# ── Dataset (Spider is ~1GB — never commit raw data) ─────────────
+data/spider/
+# Keep the folder itself
+!data/.gitkeep
+
+# ── Experiment logs ───────────────────────────────────────────────
+wandb/
+runs/
+logs/
+*.log
+tensorboard_logs/
+
+# ── Evaluation outputs (generated files, not source) ─────────────
+eval_results.json
+training_log.json
+
+# ── Jupyter ───────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS junk ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+rl_training_log.json
