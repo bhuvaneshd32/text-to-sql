@@ -26,6 +26,7 @@ import sys
 import json
 import re
 import argparse
+from joblib import memory
 import numpy as np
 
 import torch
@@ -38,7 +39,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     TRAIN_JSON, DEV_JSON, TABLES_JSON, DB_DIR,
-    CHECKPOINT_DIR, LAST_CHECKPOINT,
+    CHECKPOINT_DIR, BEST_CHECKPOINT,
 )
 from nlp.multi_task    import TextToSQLModel
 from nlp.data_pipeline import build_dataloaders
@@ -52,7 +53,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-BEST_CHECKPOINT = LAST_CHECKPOINT  # start PPO from last SL checkpoint
+# BEST_CHECKPOINT = LAST_CHECKPOINT  # start PPO from last SL checkpoint
 # ─────────────────────────────────────────────────────────────────
 # VALUE HEAD
 # ─────────────────────────────────────────────────────────────────
@@ -82,44 +83,32 @@ class ValueHead(nn.Module):
 
 def decode_step_with_hidden(model, memory, generated_tokens, device):
     """
-    Same as model.decode_step() but also returns last_hidden [1, 768].
-    Value head needs last_hidden to estimate V(s).
-    PPO loss reuses last_hidden to recompute log probs without
-    re-running the full decoder.
-
-    Returns:
-        logits:      [vocab_size]
-        last_hidden: [1, 768]
+    T5-compatible decode step. Returns logits and last decoder hidden state.
+    memory is not used directly here — T5 handles encoder-decoder attention internally.
+    We pass encoder_outputs via a wrapper to avoid re-encoding.
     """
+    t5 = model.t5
+    bos_id = t5.config.decoder_start_token_id or t5.config.pad_token_id
+
     if len(generated_tokens) == 0:
-        input_ids = torch.tensor(
-            [[model.tokenizer.cls_token_id]], device=device
-        )
+        decoder_input_ids = torch.tensor([[bos_id]], device=device)
     else:
-        input_ids = torch.tensor([generated_tokens], device=device)
+        decoder_input_ids = torch.tensor([generated_tokens], device=device)
 
-    seq_len    = input_ids.shape[1]
-    positions  = torch.arange(seq_len, device=device).unsqueeze(0)
-    dec_embeds = (
-        model.token_embedding(input_ids)
-        + model.pos_embedding(positions)
+    # memory is encoder last_hidden_state [1, seq_len, 768]
+    # wrap it so T5 doesn't re-encode
+    from transformers.modeling_outputs import BaseModelOutput
+    encoder_outputs = BaseModelOutput(last_hidden_state=memory)
+
+    outputs = t5(
+        encoder_outputs=encoder_outputs,
+        decoder_input_ids=decoder_input_ids,
+        output_hidden_states=True,
     )
-    causal_mask  = nn.Transformer.generate_square_subsequent_mask(
-        seq_len, device=device
-    )
-    enc_pad_mask = torch.zeros(
-        memory.shape[:2], dtype=torch.bool, device=device
-    )
-    dec_hidden  = model.decoder(
-        tgt=dec_embeds,
-        memory=memory,
-        tgt_mask=causal_mask,
-        memory_key_padding_mask=enc_pad_mask,
-    )
-    last_hidden = dec_hidden[:, -1, :]                             # [1, 768]
-    logits      = model.output_projection(last_hidden).squeeze(0)  # [vocab]
+
+    logits      = outputs.logits[0, -1, :]          # [vocab_size]
+    last_hidden = outputs.decoder_hidden_states[-1][:, -1, :]  # [1, 768]
     return logits, last_hidden
-
 
 # ─────────────────────────────────────────────────────────────────
 # GAE — Generalised Advantage Estimation
@@ -152,7 +141,7 @@ def compute_gae(rewards, values, gamma=0.99, lam=0.95):
 
     returns = advantages + torch.tensor(values)
 
-    if advantages.std() > 1e-8:
+    if advantages.numel() > 1 and advantages.std() > 1e-8:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     return advantages, returns
@@ -181,8 +170,9 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
 
     actions, log_probs, values, rewards, hiddens = [], [], [], [], []
     done = False
+    max_steps = 64  # hard cap — prevents runaway episodes blowing memory
 
-    while not done:
+    while not done and len(actions) < max_steps:
         with torch.no_grad():
             logits, last_hidden = decode_step_with_hidden(
                 model, memory, env.generated_tokens, device
@@ -193,10 +183,17 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
         partial = normalize_sql(env.decode_sql(env.generated_tokens))
         mask    = env.fsm.get_mask(partial)
 
-        logits        = logits.float()
+        logits = logits.float()
+        vocab_size = logits.shape[0]
+        if mask.shape[0] < vocab_size:
+            # pad mask to match vocab size — extra tokens are masked out
+            padding = torch.zeros(vocab_size - mask.shape[0], dtype=torch.bool)
+            mask = torch.cat([mask, padding])
         logits[~mask] = -1e9
 
         probs = F.softmax(logits / temperature, dim=-1)
+        probs = probs.clamp(min=1e-10)   # prevent -inf log probs on MPS
+        probs = probs / probs.sum()      # renormalize after clamp
 
         # safety: collapsed or NaN probs → argmax fallback
         if probs.sum() < 1e-9 or torch.isnan(probs).any():
@@ -205,7 +202,7 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
         else:
             dist   = Categorical(probs)
             action = dist.sample().item()
-            lp     = dist.log_prob(torch.tensor(action)).item()
+            lp     = dist.log_prob(torch.tensor(action, device=device)).item()  # device fix: must match dist's device
 
         _, reward, done, _ = env.step(action)
 
@@ -277,7 +274,7 @@ def ppo_update(
     for _ in range(ppo_epochs):
 
         # recompute logits from stored hidden states
-        new_logits    = model.output_projection(hiddens)       # [T, vocab]
+        new_logits    = model.t5.lm_head(hiddens)           # [T, vocab]
         new_log_probs = F.log_softmax(new_logits, dim=-1)
         new_lps       = new_log_probs.gather(
             1, actions.unsqueeze(1)
@@ -300,7 +297,7 @@ def ppo_update(
         # KL penalty vs frozen SL reference
         # prevents drifting too far from supervised pretraining
         with torch.no_grad():
-            ref_logits = ref_model.output_projection(hiddens)
+            ref_logits = ref_model.t5.lm_head(hiddens)
         ref_probs = F.softmax(ref_logits, dim=-1)
         kl_div    = F.kl_div(
             F.log_softmax(new_logits, dim=-1),
@@ -360,19 +357,12 @@ def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=30):
 
             memory = model.encode(input_ids, attention_mask, token_type_ids)
 
-            # greedy decode — no sampling during eval
-            generated = []
-            for _ in range(128):
-                logits, _ = decode_step_with_hidden(
-                    model, memory, generated, device
-                )
-                token = logits.argmax().item()
-                if token == tokenizer.sep_token_id:
-                    break
-                generated.append(token)
-
+            # use T5's beam search generate for eval (matches Bhuvanesh's eval_utils)
+            generated_ids = model.generate_sql(
+                input_ids, attention_mask, max_length=128, num_beams=4
+            )
             pred_sql = tokenizer.decode(
-                generated, skip_special_tokens=True
+                generated_ids[0], skip_special_tokens=True
             ).strip()
             gold_sql = tokenizer.decode(
                 gold_sql_ids.tolist(), skip_special_tokens=True
@@ -408,8 +398,12 @@ def get_curriculum_tier(episode: int) -> str:
 # ─────────────────────────────────────────────────────────────────
 
 def train_ppo(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"\n{'='*60}")
     print(f"PPO Fine-tuning — Text-to-SQL")
     print(f"{'='*60}")
@@ -430,43 +424,48 @@ def train_ppo(args):
     schema_dict = load_schema_dict(TABLES_JSON)
 
     # ── policy model ──────────────────────────────────────────────
-    model = TextToSQLModel.load_for_rl(
-        BEST_CHECKPOINT, tokenizer=tokenizer
-    )
+    model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
     model.to(device)
     model.train()
 
-    # freeze encoder — protect Bhuvanesh's trained representations
-    # only decoder, output projection, token embeddings updated by PPO
-    for p in model.encoder.parameters():
+    for p in model.t5.encoder.parameters():
         p.requires_grad = False
     print("Encoder frozen — only decoder updated by PPO.\n")
 
-    # ── frozen reference model for KL penalty ────────────────────
-    ref_model = TextToSQLModel.load_for_rl(
-        BEST_CHECKPOINT, tokenizer=tokenizer
-    )
+    ref_model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
     ref_model.to(device)
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad = False
 
-    # ── value head ────────────────────────────────────────────────
     value_head = ValueHead(hidden_size=768).to(device)
 
-    # ── optimizer ─────────────────────────────────────────────────
-    # Lower LR than supervised — PPO updates must be small
     optimizer = AdamW(
-        list(model.decoder.parameters())
-        + list(model.output_projection.parameters())
-        + list(model.token_embedding.parameters())
+        list(model.t5.decoder.parameters())
         + list(value_head.parameters()),
         lr=args.lr,
         weight_decay=0.01,
     )
-
     # ── environment ───────────────────────────────────────────────
     env = TextToSQLEnv(model, tokenizer, train_loader, schema_dict)
+
+    # ── FSM sanity check — catches tokenizer/vocab mismatch early ─
+    print("Verifying FSM masks are non-empty for T5 vocab...", flush=True)
+    _state = env.reset()
+    _fsm   = env.fsm
+    _start_mask = _fsm.get_mask("")
+    _n_valid    = _start_mask.sum().item()
+    if _n_valid == 0:
+        raise RuntimeError(
+            "FSM START mask has 0 valid tokens — tokenizer vocab mismatch!\n"
+            "Check that grammar_fsm._tokenize_keywords uses get_vocab() lookup\n"
+            "for T5's SentencePiece vocab (▁SELECT not Ġselect)."
+        )
+    print(f"  START mask: {_n_valid} valid tokens  ✓", flush=True)
+    _sel_ids = _fsm._tokenize_keywords(["SELECT", "select"])
+    print(f"  SELECT token IDs: {_sel_ids}", flush=True)
+    print(f"  SELECT tokens:    {[tokenizer.convert_ids_to_tokens([i])[0] for i in _sel_ids]}", flush=True)
+    # ─────────────────────────────────────────────────────────────
 
     # ── setup ─────────────────────────────────────────────────────
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -528,6 +527,8 @@ def train_ppo(args):
             )
 
             batch_trajs = []
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # ── evaluate every eval_interval updates ──────────────
             update_num = episode // args.batch_episodes

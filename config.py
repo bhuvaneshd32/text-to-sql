@@ -16,7 +16,7 @@ DEV_JSON    = os.path.join(SPIDER_ROOT, "dev.json")
 DB_DIR      = os.path.join(SPIDER_ROOT, "database")
 
 # ─── Model ───────────────────────────────────────────────────────
-ROBERTA_MODEL      = "roberta-base"
+T5_MODEL      = "t5-base"
 HIDDEN_SIZE        = 768
 MAX_SEQ_LEN        = 512
 

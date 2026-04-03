@@ -7,7 +7,7 @@ import torch
 from rl.reward import compute_reward
 from nlp.grammar_fsm import SQLGrammarFSM
 from nlp.schema_utils import load_schema_dict
-from config import TABLES_JSON
+from config import BEST_CHECKPOINT, TABLES_JSON
 
 def normalize_sql(sql):
     sql = re.sub(r"\s+", " ", sql)
@@ -69,19 +69,11 @@ class TextToSQLEnv:
 
     def get_state(self):
         """
-        State = encoder hidden + partial SQL tokens
+        State = encoder hidden + partial SQL tokens.
+        Returns cached memory — avoids re-encoding every step.
         """
-        input_ids      = self.current_example["input_ids"].to(self.device)
-        attention_mask = self.current_example["attention_mask"].to(self.device)
-        token_type_ids = self.current_example["token_type_ids"].to(self.device)
-
-        with torch.no_grad():
-            encoder_hidden = self.model.encode(
-                input_ids, attention_mask, token_type_ids
-            )  # [1, seq_len, 768]
-
         return {
-            "encoder_hidden": encoder_hidden,
+            "encoder_hidden": self.current_memory,
             "partial_sql": self.generated_tokens
         }
 
@@ -106,9 +98,12 @@ class TextToSQLEnv:
         token_type_ids = batch["token_type_ids"].to(self.device)
 
         with torch.no_grad():
+            device = next(self.model.parameters()).device
             self.current_memory = self.model.encode(
-                input_ids, attention_mask, token_type_ids
-            )  # [1, seq_len, 768] — cached for PPO trainer
+                input_ids.to(device),
+                attention_mask.to(device),
+                token_type_ids.to(device) if token_type_ids is not None else None,
+)
 
         # Build a fresh FSM for this episode's database schema
         db_id = batch["db_ids"][0]
@@ -162,9 +157,8 @@ class TextToSQLEnv:
         # Enforce SELECT as first token
         if self.t == 0:
             token_str = self.tokenizer.decode([action]).lower().strip()
-            if token_str != "select":
+            if "select" not in token_str:
                 return self.get_state(), -1.0, True, {"error": "must_start_with_select"}
-
         # Apply action
         self.generated_tokens.append(int(action))
         self.t += 1
@@ -221,16 +215,13 @@ class TextToSQLEnv:
         return self.get_state(), reward, done, {}
 
     def is_done(self):
-        """
-        Episode ends when EOS token is generated or max length is reached.
-        """
         if self.t >= self.max_sql_len:
             return True
-
         if len(self.generated_tokens) > 0:
-            if self.generated_tokens[-1] == self.tokenizer.sep_token_id:
+            # RoBERTa used sep_token_id — T5 uses eos_token_id
+            eos_id = self.tokenizer.eos_token_id
+            if self.generated_tokens[-1] == eos_id:
                 return True
-
         return False
 
 
@@ -244,8 +235,7 @@ if __name__ == "__main__":
         TRAIN_JSON, DEV_JSON, TABLES_JSON, batch_size=1,
     )
     model = TextToSQLModel.load_for_rl(
-        "checkpoints/pretrained_last.pt", tokenizer=tokenizer
-    )
+        BEST_CHECKPOINT)
     model.eval()
     schema_dict = load_schema_dict(TABLES_JSON)
     env = TextToSQLEnv(model, tokenizer, train_loader, schema_dict)

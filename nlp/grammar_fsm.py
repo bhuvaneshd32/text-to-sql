@@ -170,27 +170,102 @@ class SQLGrammarFSM:
 
     def _tokenize_names(self, names: List[str]) -> Set[int]:
         """
-        Tokenize table/column names and collect ALL token IDs.
-        FIX vs original: original only added tokens[0] which missed
-        subword continuations. We now add all tokens so the decoder
-        can generate multi-token names correctly.
+        Tokenize table/column names and collect token IDs.
+
+        Same T5 SentencePiece fix as _tokenize_keywords: we look up the
+        canonical surface forms (▁Name, ▁name, Name, name) via get_vocab()
+        first, and fall back to subword splitting only when no exact match
+        exists (needed for multi-token names like "Perpetrator_ID").
         """
+        vocab = self.tokenizer.get_vocab()
+        is_spm = any(k.startswith("▁") for k in list(vocab.keys())[:500])
         ids = set()
+
         for name in names:
-            tokens = self.tokenizer(name, add_special_tokens=False)["input_ids"]
-            ids.update(tokens)   # FIX: was ids.add(tokens[0])
-            tokens_spaced = self.tokenizer(" " + name, add_special_tokens=False)["input_ids"]
-            ids.update(tokens_spaced)
+            found_exact = False
+            if is_spm:
+                candidates = [
+                    "▁" + name, "▁" + name.lower(), "▁" + name.upper(),
+                    name, name.lower(), name.upper(),
+                ]
+            else:
+                candidates = [
+                    "Ġ" + name, "Ġ" + name.lower(), "Ġ" + name.upper(),
+                    name, name.lower(), name.upper(),
+                ]
+
+            for candidate in candidates:
+                if candidate in vocab:
+                    ids.add(vocab[candidate])
+                    found_exact = True
+
+            if not found_exact:
+                # Multi-token name — include all subword fragments so the
+                # decoder can generate it piece by piece
+                for text in [name, " " + name]:
+                    toks = self.tokenizer(text, add_special_tokens=False)["input_ids"]
+                    ids.update(toks)
+
         return ids
 
     def _tokenize_keywords(self, keywords: List[str]) -> Set[int]:
-        """Tokenize SQL keywords and collect all token IDs."""
+        """
+        Tokenize SQL keywords and collect token IDs.
+
+        T5 SentencePiece fix: encoding a multi-char keyword like "SELECT"
+        produces subword fragments (e.g. [4248, 7, 4]) — none of which is the
+        token the decoder actually samples (▁SELECT = token 3).
+
+        We use get_vocab() to do an exact string lookup for the canonical
+        surface forms a T5 decoder would generate:
+            "▁SELECT"  (word-initial, SentencePiece space prefix)
+            "SELECT"   (rare, no prefix)
+            "▁select"  etc.
+        and fall back to the subword split only when no exact match exists
+        (needed for punctuation like "=", "(", ",").
+        """
+        vocab = self.tokenizer.get_vocab()
         ids = set()
+
+        # Determine whether this is a SentencePiece tokenizer (T5) or BPE (RoBERTa)
+        # SentencePiece uses "▁" (U+2581) as the word-boundary prefix.
+        is_spm = any(k.startswith("▁") for k in list(vocab.keys())[:500])
+
         for kw in keywords:
-            tokens = self.tokenizer(kw, add_special_tokens=False)["input_ids"]
-            ids.update(tokens)
-            tokens_spaced = self.tokenizer(" " + kw, add_special_tokens=False)["input_ids"]
-            ids.update(tokens_spaced)
+            found_exact = False
+
+            if is_spm:
+                # Try all canonical surface forms T5 decoder would produce
+                candidates = [
+                    "▁" + kw,          # word-initial (most common)
+                    "▁" + kw.lower(),
+                    "▁" + kw.upper(),
+                    kw,                # no prefix (mid-word or punctuation)
+                    kw.lower(),
+                    kw.upper(),
+                ]
+            else:
+                # RoBERTa BPE: word-initial tokens are prefixed with Ġ
+                candidates = [
+                    "Ġ" + kw,
+                    "Ġ" + kw.lower(),
+                    "Ġ" + kw.upper(),
+                    kw,
+                    kw.lower(),
+                    kw.upper(),
+                ]
+
+            for candidate in candidates:
+                if candidate in vocab:
+                    ids.add(vocab[candidate])
+                    found_exact = True
+
+            if not found_exact:
+                # Fallback: subword split (needed for punctuation, numbers, etc.)
+                for text in [kw, " " + kw]:
+                    toks = self.tokenizer(text, add_special_tokens=False)["input_ids"]
+                    ids.update(toks)
+
         return ids
 
     def _build_number_ids(self) -> Set[int]:

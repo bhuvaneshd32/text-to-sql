@@ -21,10 +21,10 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
 
-from schema_utils import load_schema_dict
-
+from nlp.schema_utils import load_schema_dict
+from config import T5_MODEL
 # T5 tokenizer
-T5_TOKENIZER = "t5-base"
+T5_TOKENIZER = T5_MODEL
 
 # label constants — kept for cross_attention compatibility
 TABLE  = 0
