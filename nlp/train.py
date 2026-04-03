@@ -6,7 +6,7 @@ T5-base fine-tuned on Spider typically achieves 55-65% EX.
 With grammar FSM and schema-aware prompts: 65-75% EX.
 
 Run on Colab T4 GPU:
-    python train.py --epochs 15 --batch_size 16 --lr 5e-4
+    python train.py --epochs 15 --batch_size 16 --lr 3e-4
 
 Expected training time per epoch on T4: ~8-10 minutes
 Expected final EX: 55-70%
@@ -16,7 +16,7 @@ import os, sys, json, time, random, argparse
 import numpy as np
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from transformers import AutoTokenizer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -49,14 +49,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def get_warmup_scheduler(optimizer, warmup_steps):
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return float(step) / float(max(1, warmup_steps))
-        return 1.0
-    return LambdaLR(optimizer, lr_lambda)
-
-
 def evaluate_exact_match(model, dev_loader, tokenizer, device, max_batches=50):
     """
     Normalised string match using beam search decode.
@@ -87,11 +79,13 @@ def evaluate_exact_match(model, dev_loader, tokenizer, device, max_batches=50):
             attention_mask = batch["attention_mask"].to(device)
             gold_sqls      = batch["gold_sqls"]
 
-            # beam search generation — better quality than greedy
+            # FIX 4: beam search generation — better quality than greedy
             generated = model.generate_sql(
                 input_ids, attention_mask,
                 max_length=128,
                 num_beams=4,
+                length_penalty=0.6,      # Penalises overly long SQL
+                no_repeat_ngram_size=3,  # Prevents repetition loops
             )
 
             pred_sqls = tokenizer.batch_decode(generated, skip_special_tokens=True)
@@ -113,6 +107,7 @@ def train(args):
     print(f"Device:     {device}", flush=True)
     print(f"Epochs:     {args.epochs}", flush=True)
     print(f"Batch size: {args.batch_size}", flush=True)
+    print(f"Grad Accum: {args.grad_accum}", flush=True)
     print(f"LR:         {args.lr}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
@@ -127,9 +122,27 @@ def train(args):
     print("Building model...", flush=True)
     model = TextToSQLModel().to(device)
 
-    # T5 uses a higher lr than RoBERTa — 5e-4 is standard for T5 fine-tuning
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    scheduler = get_warmup_scheduler(optimizer, warmup_steps=500)
+    # FIX 1: Cosine decay with warmup and AdamW eps
+    optimizer = AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=0.01,
+        eps=1e-8,
+    )
+    
+    warmup_scheduler = LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=500
+    )
+    # Adjust total steps for CosineAnnealingLR considering gradient accumulation
+    total_steps = (args.epochs * len(train_loader)) // args.grad_accum
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer, T_max=max(1, total_steps - 500), eta_min=1e-5
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[500]
+    )
 
     if WANDB and args.use_wandb:
         wandb.init(project="text-to-sql-t5", config=vars(args))
@@ -156,6 +169,8 @@ def train(args):
         epoch_loss = 0.0
         epoch_n    = 0
         start      = time.time()
+        
+        optimizer.zero_grad() # Ensure clean slate at the start of the epoch
 
         iterator = tqdm(train_loader, desc=f"Epoch {epoch:2d}", ncols=100) if TQDM else train_loader
 
@@ -171,26 +186,31 @@ def train(args):
                 labels=labels,
             )
 
-            optimizer.zero_grad()
+            # FIX 5: Gradient Accumulation
+            loss = loss / args.grad_accum
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            global_step += 1
 
-            epoch_loss += loss.item()
+            if (batch_idx + 1) % args.grad_accum == 0 or (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+            # Multiply back to log the true loss magnitude
+            epoch_loss += loss.item() * args.grad_accum
             epoch_n    += 1
 
             # heartbeat first 5 batches
             if epoch == start_epoch and batch_idx < 5:
-                print(f"  [batch {batch_idx+1}/5]  loss={loss.item():.4f}", flush=True)
+                print(f"  [batch {batch_idx+1}/5]  loss={(loss.item() * args.grad_accum):.4f}", flush=True)
 
             if TQDM and batch_idx % 10 == 0:
                 iterator.set_postfix({"loss": f"{epoch_loss/epoch_n:.4f}"})
-            elif not TQDM and global_step % 50 == 0:
+            elif not TQDM and global_step % 50 == 0 and (batch_idx + 1) % args.grad_accum == 0:
                 print(f"Epoch {epoch} | Step {global_step} | loss={epoch_loss/epoch_n:.4f} | lr={scheduler.get_last_lr()[0]:.2e}", flush=True)
 
-            if WANDB and args.use_wandb and global_step % 50 == 0:
+            if WANDB and args.use_wandb and global_step % 50 == 0 and (batch_idx + 1) % args.grad_accum == 0:
                 wandb.log({"train/loss": epoch_loss/epoch_n, "step": global_step})
 
         # ── epoch end ──────────────────────────────────────────────
@@ -249,7 +269,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs",       type=int,   default=15)
     parser.add_argument("--batch_size",   type=int,   default=16)
-    parser.add_argument("--lr",           type=float, default=5e-4)
+    parser.add_argument("--grad_accum",   type=int,   default=2)    # ADDED
+    parser.add_argument("--lr",           type=float, default=3e-4) # Modified
     parser.add_argument("--eval_batches", type=int,   default=50)
     parser.add_argument("--resume",       action="store_true")
     parser.add_argument("--use_wandb",    action="store_true")

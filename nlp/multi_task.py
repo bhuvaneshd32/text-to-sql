@@ -114,10 +114,12 @@ class TextToSQLModel(nn.Module):
 
     def generate_sql(
         self,
-        input_ids:      torch.Tensor,
-        attention_mask: torch.Tensor,
-        max_length:     int = 128,
-        num_beams:      int = 4,
+        input_ids:            torch.Tensor,
+        attention_mask:       torch.Tensor,
+        max_length:           int   = 128,
+        num_beams:            int   = 4,
+        length_penalty:       float = 0.6,
+        no_repeat_ngram_size: int   = 3,
     ) -> torch.Tensor:
         """
         Generate SQL using beam search.
@@ -129,6 +131,8 @@ class TextToSQLModel(nn.Module):
             max_length=max_length,
             num_beams=num_beams,
             early_stopping=True,
+            length_penalty=length_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
         )
 
     def save_checkpoint(self, path: str, extra: dict = None):

@@ -37,34 +37,27 @@ IGNORE = -100
 def format_t5_input(question: str, db_id: str, schema_dict: dict,
                     max_length: int = 512) -> str:
     """
-    Format question + schema as a T5 prompt.
-
-    T5 was pretrained on tasks with natural language prefixes.
-    This format tells T5 exactly what task it's doing.
-
-    Example output:
-        "translate to SQL: How many perpetrators were killed?
-         tables: perpetrator ( Perpetrator_ID NUMBER , Killed NUMBER )
-         | people ( People_ID NUMBER , Name TEXT )"
+    PICARD-style schema format — proven to work well with T5 on Spider.
+    Format:
+        "question: How many perpetrators? | col : Perpetrator_ID | col : Killed | 
+         table : perpetrator | col : People_ID | col : Name | table : people"
     """
     entry  = schema_dict[db_id]
     tables = entry["tables"]
     cols   = entry["columns"]
 
-    # group columns by table
+    # group columns by table, preserve order
     table_cols = {t: [] for t in tables}
     for col_name, col_type, t_idx in cols:
-        table_cols[tables[t_idx]].append(f"{col_name} {col_type}")
+        table_cols[tables[t_idx]].append(col_name)
 
-    # format schema
-    schema_parts = []
+    parts = [f"question: {question}"]
     for t in tables:
-        col_str = " , ".join(table_cols[t])
-        schema_parts.append(f"{t} ( {col_str} )")
-    schema_str = " | ".join(schema_parts)
+        for col in table_cols[t]:
+            parts.append(f"col : {col}")
+        parts.append(f"table : {t}")
 
-    prompt = f"translate to SQL: {question} tables: {schema_str}"
-    return prompt
+    return " | ".join(parts)
 
 
 class SpiderDataset(Dataset):
