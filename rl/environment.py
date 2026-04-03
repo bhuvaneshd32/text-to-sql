@@ -25,87 +25,66 @@ class TextToSQLEnv:
         max_sql_len=128,
         device="cpu",
     ):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.dataloader = dataloader
+        self.model       = model
+        self.tokenizer   = tokenizer
+        self.dataloader  = dataloader
         self.schema_dict = schema_dict
         self.max_sql_len = max_sql_len
-        self.device = device
+        self.device      = device
 
-        self.data_iter = iter(dataloader)
-        self.current_example = None
-        self.current_memory = None
+        self.data_iter        = iter(dataloader)
+        self.current_example  = None
+        self.current_memory   = None
         self.generated_tokens = []
-        self.t = 0
-        self.fsm = None
+        self.t                = 0
+        self.fsm              = None
+
+        # T5 EOS token id — used for episode termination
+        self._eos_id = self.tokenizer.eos_token_id
 
     def decode_sql(self, token_ids):
         """
         Convert token ids to SQL string.
-        Handles RoBERTa Ġ subword prefix correctly —
-        Ġ means the token is preceded by a space, so replace with actual space
-        rather than stripping, which was causing tokens to merge into garbage.
+        T5 uses SentencePiece with ▁ prefix (not RoBERTa's Ġ).
+        We decode the full sequence at once for correct reconstruction.
         """
         if len(token_ids) == 0:
             return ""
-
         if isinstance(token_ids[0], list):
             token_ids = [t for sub in token_ids for t in sub]
 
-        # Decode each token individually to preserve word boundaries
-        tokens = [
-            self.tokenizer.decode([tid], skip_special_tokens=True)
-            for tid in token_ids
-        ]
-
-        reconstructed = ""
-        for tok in tokens:
-            if tok.startswith("Ġ"):
-                reconstructed += " " + tok[1:]
-            else:
-                reconstructed += tok
-
-        return " ".join(reconstructed.split()).strip()
+        # Decode full sequence at once — T5 SentencePiece handles
+        # word boundaries correctly this way
+        text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
+        return " ".join(text.split()).strip()
 
     def get_state(self):
-        """
-        State = encoder hidden + partial SQL tokens.
-        Returns cached memory — avoids re-encoding every step.
-        """
         return {
             "encoder_hidden": self.current_memory,
-            "partial_sql": self.generated_tokens
+            "partial_sql":    self.generated_tokens,
         }
 
     def reset(self):
-        """
-        Start a new episode.
-        Caches encoder output as current_memory so PPO trainer
-        can access it without re-encoding every step.
-        """
+        """Start a new episode. Caches encoder output."""
         try:
             batch = next(self.data_iter)
         except StopIteration:
             self.data_iter = iter(self.dataloader)
             batch = next(self.data_iter)
 
-        self.current_example = batch
+        self.current_example  = batch
         self.generated_tokens = []
-        self.t = 0
+        self.t                = 0
 
-        input_ids      = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        token_type_ids = batch["token_type_ids"].to(self.device)
+        device = next(self.model.parameters()).device
+        input_ids      = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
 
         with torch.no_grad():
-            device = next(self.model.parameters()).device
             self.current_memory = self.model.encode(
-                input_ids.to(device),
-                attention_mask.to(device),
-                token_type_ids.to(device) if token_type_ids is not None else None,
-)
+                input_ids, attention_mask
+            )
 
-        # Build a fresh FSM for this episode's database schema
         db_id = batch["db_ids"][0]
         self.fsm = SQLGrammarFSM(
             db_id=db_id,
@@ -118,35 +97,35 @@ class TextToSQLEnv:
     def step(self, action):
         """
         Take one action (generate next token).
-        Returns (state, reward, done, info).
-        Reward is 0 at every intermediate step.
-        Terminal reward = R_exec + R_sem + R_eff via compute_reward().
+        Terminal reward = compute_reward() at end of episode.
+        Intermediate reward = small shaped signal for structure milestones.
         """
-        # Normalize partial SQL for FSM state inference
-        partial_sql = re.sub(r"\s+", " ", self.decode_sql(self.generated_tokens))
-        partial_sql = partial_sql.replace("(", " ( ").replace(")", " ) ")
-        partial_sql = partial_sql.replace(",", " , ")
-        partial_sql = partial_sql.lower().strip()
+        partial_sql = normalize_sql(self.decode_sql(self.generated_tokens))
 
-        mask = self.fsm.get_mask(partial_sql)
+        mask       = self.fsm.get_mask(partial_sql)
         vocab_size = mask.shape[0]
 
-        # Force EOS if episode is running too long
+        # Force EOS if episode running too long
+        # Use eos_token_id for T5 (not sep_token_id which is None in T5)
         if self.t > 25:
-            eos_id = self.tokenizer.sep_token_id
+            eos_id = self._eos_id
             if eos_id is not None and eos_id < vocab_size:
                 mask[:] = False
                 mask[eos_id] = True
 
-        # Force FROM if SELECT clause has at least one column and no FROM yet
+        # Force FROM if no FROM yet after enough steps
+        # Only force if we haven't already seen FROM
         if "from" not in partial_sql and self.t > 10:
-            from_token_ids = self.tokenizer.encode(" from", add_special_tokens=False)
-            mask[:] = False
+            from_token_ids = self.tokenizer.encode(
+                " from", add_special_tokens=False
+            )
+            # Don't zero the whole mask — just ensure FROM is allowed
+            # Zeroing caused entropy collapse by leaving only 1 valid token
             for tid in from_token_ids:
                 if tid < vocab_size:
                     mask[tid] = True
 
-        # Handle out-of-bounds action
+        # Handle out-of-bounds
         if action < 0 or action >= vocab_size:
             return self.get_state(), -1.0, True, {"error": "action_out_of_bounds"}
 
@@ -154,29 +133,28 @@ class TextToSQLEnv:
         if not mask[action]:
             return self.get_state(), -1.0, True, {"error": "invalid_action"}
 
-        # Enforce SELECT as first token
+        # Enforce SELECT as first token (T5-safe check)
         if self.t == 0:
-            token_str = self.tokenizer.decode([action]).lower().strip()
+            token_str = self.tokenizer.decode(
+                [action], skip_special_tokens=True
+            ).lower().strip()
             if "select" not in token_str:
                 return self.get_state(), -1.0, True, {"error": "must_start_with_select"}
+
         # Apply action
         self.generated_tokens.append(int(action))
         self.t += 1
 
-        # Log FSM state for debugging
-        new_partial = re.sub(r"\s+", " ", self.decode_sql(self.generated_tokens))
-        new_partial = new_partial.replace("(", " ( ").replace(")", " ) ")
-        new_partial = new_partial.replace(",", " , ").lower().strip()
-        fsm_state = self.fsm._infer_state(new_partial)
-        print("FSM State:", fsm_state)
+        new_partial = normalize_sql(self.decode_sql(self.generated_tokens))
 
         done = self.is_done()
 
         if done:
             pred_sql = self.decode_sql(self.generated_tokens)
             gold_sql_ids = self.current_example["gold_sql_ids"][0]
+            gold_ids = [tid for tid in gold_sql_ids.tolist() if tid >= 0]
             gold_sql = self.tokenizer.decode(
-                gold_sql_ids, skip_special_tokens=True
+                gold_ids, skip_special_tokens=True
             )
             db_id   = self.current_example["db_ids"][0]
             db_path = os.path.join(
@@ -190,23 +168,21 @@ class TextToSQLEnv:
                 sql_tokens=self.generated_tokens,
             )
 
-            print("\n--- DEBUG ---")
-            print("Pred SQL:", pred_sql[:100])
-            print("Gold SQL:", gold_sql[:100])
-            print("DB:", db_id)
+            # Only print every 50 episodes to reduce noise
+            if self.t % 50 == 1:
+                print(f"\n--- DEBUG ---")
+                print(f"Pred: {pred_sql[:100]}")
+                print(f"Gold: {gold_sql[:100]}")
+                print(f"DB:   {db_id}")
 
         else:
+            # Shaped intermediate reward for structural milestones
             shaped = 0.0
             prev_partial = normalize_sql(
                 self.decode_sql(self.generated_tokens[:-1])
             )
-            # Only reward FROM if it follows a real column, not just any token
             if "from" in new_partial and "from" not in prev_partial:
-                # Check at least one schema column was selected before FROM
-                has_col = any(
-                    col in prev_partial
-                    for col in self.fsm.columns
-                )
+                has_col = any(col in prev_partial for col in self.fsm.columns)
                 shaped += 0.05 if has_col else 0.01
             if "where" in new_partial and "where" not in prev_partial:
                 shaped += 0.03
@@ -218,9 +194,8 @@ class TextToSQLEnv:
         if self.t >= self.max_sql_len:
             return True
         if len(self.generated_tokens) > 0:
-            # RoBERTa used sep_token_id — T5 uses eos_token_id
-            eos_id = self.tokenizer.eos_token_id
-            if self.generated_tokens[-1] == eos_id:
+            # T5 uses eos_token_id — sep_token_id is None in T5
+            if self.generated_tokens[-1] == self._eos_id:
                 return True
         return False
 
