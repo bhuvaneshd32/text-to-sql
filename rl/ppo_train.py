@@ -142,27 +142,26 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
             )
             value = value_head(last_hidden).item()
 
-        partial  = normalize_sql(env.decode_sql(env.generated_tokens))
-        mask     = env.fsm.get_mask(partial)
-        valid_count = mask.sum().item()
-        if valid_count < 5:
-            # FSM too restrictive — allow top-5 logits among valid tokens
-            # This preserves grammar constraints while allowing exploration
-            valid_logits = logits.clone()
-            valid_logits[~mask] = -1e9
-            top_valid = valid_logits.topk(min(5, int(valid_count))).indices
-            expanded_mask = mask.clone()
-            expanded_mask[top_valid] = True
-            mask = expanded_mask
+        partial    = normalize_sql(env.decode_sql(env.generated_tokens))
+        mask       = env.fsm.get_mask(partial)
         logits     = logits.float()
         vocab_size = logits.shape[0]
 
-        # pad mask if T5 vocab > FSM vocab
+        # ── 1. pad/trim mask to match T5 vocab FIRST ──────────────
         if mask.shape[0] < vocab_size:
-            pad     = torch.zeros(vocab_size - mask.shape[0], dtype=torch.bool)
-            mask    = torch.cat([mask, pad])
+            pad  = torch.zeros(vocab_size - mask.shape[0], dtype=torch.bool)
+            mask = torch.cat([mask, pad])
         elif mask.shape[0] > vocab_size:
             mask = mask[:vocab_size]
+
+        # ── 2. now safe to index logits with mask ─────────────────
+        valid_count = mask.sum().item()
+        if valid_count < 5:
+            valid_logits = logits.clone()
+            valid_logits[~mask] = -1e9
+            top_valid    = valid_logits.topk(min(5, int(valid_count))).indices
+            mask         = mask.clone()
+            mask[top_valid] = True
 
         logits[~mask] = -1e9
 

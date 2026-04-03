@@ -28,6 +28,7 @@ nlp/checkpoints/*.bin
 
 # ── Dataset (Spider is ~1GB — never commit raw data) ─────────────
 data/spider/
+data/spider.zip
 # Keep the folder itself
 !data/.gitkeep
 
