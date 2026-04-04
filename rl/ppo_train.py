@@ -287,20 +287,30 @@ def ppo_update(
 def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=150):
     model.eval()
     ex_scores, f1_scores = [], []
+
     with torch.no_grad():
         for i, batch in enumerate(dev_loader):
             if i >= n_batches:
                 break
-            input_ids      = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+
+            input_ids      = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
             gold_sql_ids   = batch["gold_sql_ids"][0]
             db_id          = batch["db_ids"][0]
 
-            generated = model.generate_sql(input_ids, attention_mask)
-            pred_sql  = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
-            gold_ids  = [t for t in gold_sql_ids.tolist() if t >= 0]
-            gold_sql  = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
-            db_path   = os.path.join(db_dir, db_id, f"{db_id}.sqlite")
+            # greedy decode (temperature=0, deterministic) — best single sequence
+            generated = model.generate_sql(
+                input_ids.to(device),
+                attention_mask.to(device),
+                max_length=128,
+                num_beams=4,
+            )
+
+
+            pred_sql = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
+            gold_ids = [t for t in gold_sql_ids.tolist() if t >= 0]
+            gold_sql = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
+            db_path  = os.path.join(db_dir, db_id, f"{db_id}.sqlite")
 
             ex_scores.append(exec_accuracy(pred_sql, gold_sql, db_path))
             f1_scores.append(result_set_f1(pred_sql, gold_sql, db_path))
@@ -386,17 +396,18 @@ def train_ppo(args):
         # ── SAMPLE on CPU (MPS crashes with do_sample=True) ──────
         model.cpu()
         model.eval()
+        # On CUDA — do_sample works fine, no need for CPU workaround
         with torch.no_grad():
             sample_out = model.t5.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=input_ids.to(device),
+                attention_mask=attention_mask.to(device),
                 max_length=128,
                 do_sample=True,
                 temperature=args.temperature,
                 return_dict_in_generate=True,
                 output_scores=True,
             )
-        model.to(device)
+        # model.to(device)
         model.train()
 
         sequences = sample_out.sequences          # [1, seq_len] on CPU
@@ -415,7 +426,7 @@ def train_ppo(args):
             gamma=args.gamma,
             delta=args.delta,
         )
-        reward_baseline = 0.99 * reward_baseline + 0.01 * reward
+        reward_baseline = 0.9 * reward_baseline + 0.1 * reward
         advantage       = reward - reward_baseline
 
         if episode <= 30:
