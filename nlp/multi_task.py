@@ -58,6 +58,8 @@ class TextToSQLModel(nn.Module):
         self.t5 = T5ForConditionalGeneration.from_pretrained(t5_model)
         self.config = self.t5.config
 
+        # ---> THE MAGIC OOM FIX <---
+        self.t5.gradient_checkpointing_enable()
         # expose vocab size for compatibility
         self.vocab_size = self.config.vocab_size
 
