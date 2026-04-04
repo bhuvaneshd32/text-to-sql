@@ -385,8 +385,8 @@ def train_ppo(args):
             data_iter = iter(train_loader)
             batch = next(data_iter)
 
-        input_ids      = batch["input_ids"]       # keep on CPU for sampling
-        attention_mask = batch["attention_mask"]
+        input_ids      = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
         gold_sql_ids   = batch["gold_sql_ids"][0]
         db_id          = batch["db_ids"][0]
         gold_ids       = [t for t in gold_sql_ids.tolist() if t >= 0]
@@ -396,18 +396,16 @@ def train_ppo(args):
         # ── SAMPLE on CPU (MPS crashes with do_sample=True) ──────
         model.cpu()
         model.eval()
-        # On CUDA — do_sample works fine, no need for CPU workaround
         with torch.no_grad():
             sample_out = model.t5.generate(
-                input_ids=input_ids.to(device),
-                attention_mask=attention_mask.to(device),
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_length=128,
                 do_sample=True,
                 temperature=args.temperature,
                 return_dict_in_generate=True,
                 output_scores=True,
             )
-        # model.to(device)
         model.train()
 
         sequences = sample_out.sequences          # [1, seq_len] on CPU
