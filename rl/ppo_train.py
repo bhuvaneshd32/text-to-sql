@@ -393,8 +393,7 @@ def train_ppo(args):
         gold_sql       = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
         db_path        = os.path.join(DB_DIR, db_id, f"{db_id}.sqlite")
 
-        # ── SAMPLE on CPU (MPS crashes with do_sample=True) ──────
-        model.cpu()
+        # ── SAMPLE on GPU ────────────────────────────────────────
         model.eval()
         with torch.no_grad():
             sample_out = model.t5.generate(
@@ -408,7 +407,7 @@ def train_ppo(args):
             )
         model.train()
 
-        sequences = sample_out.sequences          # [1, seq_len] on CPU
+        sequences = sample_out.sequences
         pred_ids  = sequences[0][1:]
         pred_sql  = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
 
@@ -430,28 +429,25 @@ def train_ppo(args):
         if episode <= 30:
             print(f"[SAMPLE ep{episode}] reward={reward:.2f} | pred='{pred_sql[:60]}'", flush=True)
 
-        # ── POLICY GRADIENT UPDATE on device ────────────────────
-        labels = sequences[:, 1:].clone().to(device)
+        # ── POLICY GRADIENT UPDATE ───────────────────────────────
+        labels = sequences[:, 1:].clone()
         labels[labels == model.t5.config.pad_token_id] = -100
 
         outputs = model.t5(
-            input_ids=input_ids.to(device),
-            attention_mask=attention_mask.to(device),
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             labels=labels,
         )
-        # outputs.loss = mean NLL of sampled sequence = -mean log pi(a|s)
-        # policy gradient: maximize advantage * log pi → minimize -advantage * log pi
-        policy_loss = advantage * outputs.loss   # loss = -log pi, so *advantage directly
+        policy_loss = advantage * outputs.loss
 
-        # ── KL vs ref (both on CPU, no MPS) ─────────────────────
+        # ── KL vs ref on CPU ─────────────────────────────────────
         with torch.no_grad():
             ref_out = ref_model.t5(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=sequences[:, 1:].clone(),
+                input_ids=input_ids.cpu(),
+                attention_mask=attention_mask.cpu(),
+                labels=sequences[:, 1:].clone().cpu(),
             )
-        kl = (outputs.loss.item() - ref_out.loss.item())  # approx KL, scalar
-        kl = max(0.0, kl)
+        kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
 
         loss = policy_loss + args.kl_coef * kl
 
