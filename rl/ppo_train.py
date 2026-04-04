@@ -439,7 +439,10 @@ def train_ppo(args):
             labels=labels,
         )
         policy_loss = advantage * outputs.loss
-
+        
+        policy_loss = torch.clamp(policy_loss, -0.5, 0.5)
+        reward = float(np.clip(reward, -1.0, 1.5))
+        advantage = float(np.clip(advantage, -2.0, 2.0))
         # ── KL vs ref on CPU ─────────────────────────────────────
         with torch.no_grad():
             ref_out = ref_model.t5(
