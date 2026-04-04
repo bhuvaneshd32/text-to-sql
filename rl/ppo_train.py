@@ -353,6 +353,11 @@ def train_ppo(args):
     # policy model — on device for gradient updates
     model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
     model.to(device)
+    # print("=== BASELINE EXECUTION ACCURACY CHECK ===")
+    # baseline_scores = evaluate_rl(model, dev_loader, tokenizer, device, db_dir=DB_DIR, n_batches=150)
+    # print(f"Baseline exec_acc: {baseline_scores['exec_acc']*100:.2f}%")
+    # print(f"Baseline f1:       {baseline_scores['f1']*100:.2f}%")
+
     model.train()
     for p in model.t5.encoder.parameters():
         p.requires_grad = False
