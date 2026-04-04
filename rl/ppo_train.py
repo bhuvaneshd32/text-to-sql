@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.distributions import Categorical
 from transformers.modeling_outputs import BaseModelOutput
+from rl.reward import compute_reward
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -171,7 +172,7 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
 
         if torch.isnan(probs).any() or probs.sum() < 1e-9:
             action = logits.argmax().item()
-            lp     = 0.0
+            lp     = F.log_softmax(logits, dim=-1)[action].item()
         else:
             dist   = Categorical(probs)
             action = dist.sample().item()
@@ -184,6 +185,9 @@ def collect_trajectory(env, model, value_head, device, temperature=0.8):
         values.append(value)
         rewards.append(reward)
         hiddens.append(last_hidden.squeeze(0).detach().cpu())
+
+    if rewards and rewards[-1] <= -0.9:
+        print(f"[PENALTY] Episode ended with penalty at step {len(actions)}", flush=True)
 
     return {
         "actions":      actions,
@@ -244,13 +248,15 @@ def ppo_update(
         entropy = -(probs * (new_log_probs + 1e-8)).sum(dim=-1).mean()
 
         with torch.no_grad():
-            ref_logits = ref_model.t5.lm_head(hiddens)
-        ref_probs = F.softmax(ref_logits, dim=-1)
-        kl_div    = F.kl_div(
+            ref_logits    = ref_model.t5.lm_head(hiddens)
+
+        with torch.no_grad():
+            ref_logits    = ref_model.t5.lm_head(hiddens)
+        kl_div = F.kl_div(
             F.log_softmax(new_logits, dim=-1),
-            ref_probs,
+            F.softmax(ref_logits, dim=-1),
             reduction="batchmean",
-        )
+        ).clamp(0, 1.0)
 
         loss = L_policy + vf_coef * L_value - ent_coef * entropy + kl_coef * kl_div
 
@@ -278,52 +284,24 @@ def ppo_update(
 # NOT beam search — beam search measures SL quality, not RL policy
 # ─────────────────────────────────────────────────────────────────
 
-def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=30):
-    """
-    Evaluate using the RL policy's greedy token-by-token generation.
-    This measures what PPO has actually learned, not the SL beam search.
-    Samples randomly from dev set to avoid memorized examples.
-    """
+def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=150):
     model.eval()
     ex_scores, f1_scores = [], []
-
-    # Random sample to avoid hitting same memorized examples every eval
-    all_batches   = list(dev_loader)
-    sample_size   = min(n_batches, len(all_batches))
-    sampled       = random.sample(all_batches, sample_size)
-
     with torch.no_grad():
-        for batch in sampled:
+        for i, batch in enumerate(dev_loader):
+            if i >= n_batches:
+                break
             input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            db_id          = batch["db_ids"][0]
             gold_sql_ids   = batch["gold_sql_ids"][0]
+            db_id          = batch["db_ids"][0]
 
-            # Encode once
-            memory = model.encode(input_ids, attention_mask)
+            generated = model.generate_sql(input_ids, attention_mask)
+            pred_sql  = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
+            gold_ids  = [t for t in gold_sql_ids.tolist() if t >= 0]
+            gold_sql  = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
+            db_path   = os.path.join(db_dir, db_id, f"{db_id}.sqlite")
 
-            # Greedy decode using RL policy (token by token)
-            generated = []
-            eos_id    = tokenizer.eos_token_id
-            for _ in range(128):
-                logits, _ = decode_step_with_hidden(
-                    model, memory, generated, device
-                )
-                token = logits.argmax().item()
-                if token == eos_id:
-                    break
-                generated.append(token)
-
-            pred_sql = tokenizer.decode(
-                generated, skip_special_tokens=True
-            ).strip()
-
-            gold_ids = [tid for tid in gold_sql_ids.tolist() if tid >= 0]
-            gold_sql = tokenizer.decode(
-                gold_ids, skip_special_tokens=True
-            ).strip()
-
-            db_path = os.path.join(db_dir, db_id, f"{db_id}.sqlite")
             ex_scores.append(exec_accuracy(pred_sql, gold_sql, db_path))
             f1_scores.append(result_set_f1(pred_sql, gold_sql, db_path))
 
@@ -353,182 +331,164 @@ def get_curriculum_tier(episode: int) -> str:
 # ─────────────────────────────────────────────────────────────────
 
 def train_ppo(args):
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-
-    print(f"\n{'='*60}")
-    print(f"PPO Fine-tuning — Text-to-SQL")
-    print(f"{'='*60}")
-    print(f"Device:          {device}")
-    print(f"Episodes:        {args.episodes}")
-    print(f"Batch episodes:  {args.batch_episodes}")
-    print(f"PPO epochs:      {args.ppo_epochs}")
-    print(f"LR:              {args.lr}")
-    print(f"clip_eps:        {args.clip_eps}")
-    print(f"ent_coef:        {args.ent_coef}")
-    print(f"kl_coef:         {args.kl_coef}")
-    print(f"{'='*60}\n")
+    device = (torch.device("cuda") if torch.cuda.is_available()
+              else torch.device("mps") if torch.backends.mps.is_available()
+              else torch.device("cpu"))
+    print(f"Device: {device}")
 
     train_loader, dev_loader, _, tokenizer = build_dataloaders(
         TRAIN_JSON, DEV_JSON, TABLES_JSON, batch_size=1
     )
-    schema_dict = load_schema_dict(TABLES_JSON)
 
+    # policy model — on device for gradient updates
     model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
     model.to(device)
     model.train()
-
-    # Freeze encoder — only decoder updated by PPO
     for p in model.t5.encoder.parameters():
         p.requires_grad = False
-    print("Encoder frozen — only decoder updated by PPO.\n")
 
+    # ref model — stays on CPU for KL (avoids MPS sampling bug)
     ref_model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
-    ref_model.to(device)
+    ref_model.cpu()
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad = False
 
-    value_head = ValueHead(hidden_size=model.t5.config.d_model).to(device)
-
     optimizer = AdamW(
-        list(model.t5.decoder.parameters()) + list(value_head.parameters()),
-        lr=args.lr,
-        weight_decay=0.01,
+        list(model.t5.decoder.parameters()) +
+        list(model.t5.lm_head.parameters()),
+        lr=args.lr, weight_decay=0.01
     )
 
-    env = TextToSQLEnv(model, tokenizer, train_loader, schema_dict, device=str(device))
-
-    # FSM sanity check
-    print("Verifying FSM masks are non-empty for T5 vocab...", flush=True)
-    _state      = env.reset()
-    _start_mask = env.fsm.get_mask("")
-    _n_valid    = _start_mask.sum().item()
-    if _n_valid == 0:
-        raise RuntimeError("FSM START mask is empty — tokenizer/vocab mismatch.")
-    print(f"  START mask: {_n_valid} valid tokens  ✓", flush=True)
-    _sel_ids = env.fsm._tokenize_keywords(["SELECT", "select"])
-    print(f"  SELECT token IDs: {_sel_ids}", flush=True)
-
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    log           = []
     best_exec_acc = 0.0
-    batch_trajs   = []
+    log           = []
+    data_iter     = iter(train_loader)
+    reward_baseline = 0.0
 
-    if WANDB_AVAILABLE and args.use_wandb:
-        wandb.init(project="text2sql-ppo", config=vars(args))
-
-    print("Starting PPO training...\n")
+    print("Starting REINFORCE training...\n")
 
     for episode in range(1, args.episodes + 1):
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(train_loader)
+            batch = next(data_iter)
 
-        traj = collect_trajectory(
-            env, model, value_head, device,
-            temperature=args.temperature,
+        input_ids      = batch["input_ids"]       # keep on CPU for sampling
+        attention_mask = batch["attention_mask"]
+        gold_sql_ids   = batch["gold_sql_ids"][0]
+        db_id          = batch["db_ids"][0]
+        gold_ids       = [t for t in gold_sql_ids.tolist() if t >= 0]
+        gold_sql       = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
+        db_path        = os.path.join(DB_DIR, db_id, f"{db_id}.sqlite")
+
+        # ── SAMPLE on CPU (MPS crashes with do_sample=True) ──────
+        model.cpu()
+        model.eval()
+        with torch.no_grad():
+            sample_out = model.t5.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=128,
+                do_sample=True,
+                temperature=args.temperature,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+        model.to(device)
+        model.train()
+
+        sequences = sample_out.sequences          # [1, seq_len] on CPU
+        pred_ids  = sequences[0][1:]
+        pred_sql  = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+
+        # ── REWARD ───────────────────────────────────────────────
+        sql_tokens = tokenizer.encode(pred_sql, add_special_tokens=False)
+        reward = compute_reward(
+            pred_sql=pred_sql,
+            gold_sql=gold_sql,
+            db_path=db_path,
+            sql_tokens=sql_tokens,
+            alpha=args.alpha,
+            beta=args.beta,
+            gamma=args.gamma,
+            delta=args.delta,
         )
-        batch_trajs.append(traj)
+        reward_baseline = 0.99 * reward_baseline + 0.01 * reward
+        advantage       = reward - reward_baseline
+
+        if episode <= 30:
+            print(f"[SAMPLE ep{episode}] reward={reward:.2f} | pred='{pred_sql[:60]}'", flush=True)
+
+        # ── POLICY GRADIENT UPDATE on device ────────────────────
+        labels = sequences[:, 1:].clone().to(device)
+        labels[labels == model.t5.config.pad_token_id] = -100
+
+        outputs = model.t5(
+            input_ids=input_ids.to(device),
+            attention_mask=attention_mask.to(device),
+            labels=labels,
+        )
+        # outputs.loss = mean NLL of sampled sequence = -mean log pi(a|s)
+        # policy gradient: maximize advantage * log pi → minimize -advantage * log pi
+        policy_loss = advantage * outputs.loss   # loss = -log pi, so *advantage directly
+
+        # ── KL vs ref (both on CPU, no MPS) ─────────────────────
+        with torch.no_grad():
+            ref_out = ref_model.t5(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=sequences[:, 1:].clone(),
+            )
+        kl = (outputs.loss.item() - ref_out.loss.item())  # approx KL, scalar
+        kl = max(0.0, kl)
+
+        loss = policy_loss + args.kl_coef * kl
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
 
         if episode % 10 == 0:
-            recent     = batch_trajs[-min(10, len(batch_trajs)):]
-            avg_reward = np.mean([t["final_reward"] for t in recent])
-            avg_steps  = np.mean([t["steps"]        for t in recent])
             print(
-                f"Ep {episode:5d} | "
-                f"reward={avg_reward:+.4f} | "
-                f"steps={avg_steps:.1f} | "
-                f"tier={get_curriculum_tier(episode)}",
+                f"Ep {episode:5d} | reward={reward:+.4f} | "
+                f"adv={advantage:+.4f} | loss={loss.item():.4f} | kl={kl:.4f}",
                 flush=True,
             )
 
-        if len(batch_trajs) >= args.batch_episodes:
-            loss_info  = ppo_update(
-                model, value_head, ref_model,
-                optimizer, batch_trajs, device,
-                clip_eps   = args.clip_eps,
-                vf_coef    = args.vf_coef,
-                ent_coef   = args.ent_coef,
-                kl_coef    = args.kl_coef,
-                ppo_epochs = args.ppo_epochs,
+        # ── EVAL ─────────────────────────────────────────────────
+        if episode % (args.eval_interval * args.batch_episodes) == 0:
+            print(f"  → Evaluating...", flush=True)
+            eval_scores = evaluate_rl(
+                model, dev_loader, tokenizer, device,
+                db_dir=DB_DIR, n_batches=150,
             )
-            avg_reward = np.mean([t["final_reward"] for t in batch_trajs])
-
             print(
-                f"  → PPO update | "
-                f"loss={loss_info['loss']:.4f} | "
-                f"policy={loss_info['policy']:.4f} | "
-                f"value={loss_info['value']:.4f} | "
-                f"entropy={loss_info['entropy']:.4f} | "
-                f"kl={loss_info['kl']:.4f} | "
-                f"avg_reward={avg_reward:.4f}",
+                f"  → Eval | exec_acc={eval_scores['exec_acc']*100:.2f}% | "
+                f"f1={eval_scores['f1']*100:.2f}%",
                 flush=True,
             )
-
-            batch_trajs = []
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            update_num = episode // args.batch_episodes
-            if update_num % args.eval_interval == 0:
-                print(f"  → Evaluating...", flush=True)
-                eval_scores = evaluate_rl(
-                    model, dev_loader, tokenizer,
-                    device, db_dir=DB_DIR, n_batches=30,
+            if eval_scores["exec_acc"] > best_exec_acc:
+                best_exec_acc = eval_scores["exec_acc"]
+                model.save_checkpoint(
+                    os.path.join(CHECKPOINT_DIR, "rl_best.pt"),
+                    extra={"episode": episode, "exec_acc": best_exec_acc},
                 )
-                print(
-                    f"  → Eval | "
-                    f"exec_acc={eval_scores['exec_acc']*100:.2f}% | "
-                    f"f1={eval_scores['f1']*100:.2f}%",
-                    flush=True,
-                )
+                print(f"  ✓ New best (exec_acc={best_exec_acc*100:.2f}%)", flush=True)
 
-                if eval_scores["exec_acc"] > best_exec_acc:
-                    best_exec_acc = eval_scores["exec_acc"]
-                    model.save_checkpoint(
-                        os.path.join(CHECKPOINT_DIR, "rl_best.pt"),
-                        extra={
-                            "episode":  episode,
-                            "exec_acc": best_exec_acc,
-                            "f1":       eval_scores["f1"],
-                        },
-                    )
-                    print(
-                        f"  ✓ New best RL checkpoint "
-                        f"(exec_acc={best_exec_acc*100:.2f}%)",
-                        flush=True,
-                    )
+            log.append({
+                "episode":  episode,
+                "reward":   reward,
+                "exec_acc": eval_scores["exec_acc"],
+                "f1":       eval_scores["f1"],
+                "kl":       kl,
+            })
+            with open("rl_training_log.json", "w") as f:
+                json.dump(log, f, indent=2)
 
-                entry = {
-                    "episode":    episode,
-                    "avg_reward": avg_reward,
-                    "exec_acc":   eval_scores["exec_acc"],
-                    "f1":         eval_scores["f1"],
-                    **loss_info,
-                }
-                log.append(entry)
-                with open("rl_training_log.json", "w") as f:
-                    json.dump(log, f, indent=2)
-
-                if WANDB_AVAILABLE and args.use_wandb:
-                    wandb.log({
-                        "episode":    episode,
-                        "avg_reward": avg_reward,
-                        **eval_scores,
-                        **loss_info,
-                    })
-
-                if loss_info["kl"] > 0.5:
-                    print(
-                        f"  [WARNING] KL={loss_info['kl']:.4f} > 0.5 — "
-                        f"increase --kl_coef",
-                        flush=True,
-                    )
-
-    print(f"\n{'='*60}")
-    print(f"PPO complete. Best exec_acc: {best_exec_acc*100:.2f}%")
+    print(f"\nBest exec_acc: {best_exec_acc*100:.2f}%")
     print(f"Checkpoint: {CHECKPOINT_DIR}/rl_best.pt")
 
     if WANDB_AVAILABLE and args.use_wandb:
@@ -542,9 +502,9 @@ def train_ppo(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes",       type=int,   default=3000)
-    parser.add_argument("--batch_episodes", type=int,   default=16)
+    parser.add_argument("--batch_episodes", type=int,   default=32)
     parser.add_argument("--ppo_epochs",     type=int,   default=4)
-    parser.add_argument("--lr",             type=float, default=1e-5)
+    parser.add_argument("--lr",             type=float, default=3e-5)
     parser.add_argument("--clip_eps",       type=float, default=0.2)
     parser.add_argument("--vf_coef",        type=float, default=0.5)
     parser.add_argument("--ent_coef",       type=float, default=0.01)

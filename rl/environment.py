@@ -103,24 +103,24 @@ class TextToSQLEnv:
         partial_sql = normalize_sql(self.decode_sql(self.generated_tokens))
 
         mask       = self.fsm.get_mask(partial_sql)
-        vocab_size = mask.shape[0]
+        vocab_size = 32128  # T5 lm_head output size — larger than tokenizer.vocab_size
+
+        # pad mask to actual tokenizer vocab size
+        if mask.shape[0] < vocab_size:
+            pad  = torch.zeros(vocab_size - mask.shape[0], dtype=torch.bool)
+            mask = torch.cat([mask, pad])
+
 
         # Force EOS if episode running too long
-        # Use eos_token_id for T5 (not sep_token_id which is None in T5)
-        if self.t > 25:
+        if self.t > 60:
             eos_id = self._eos_id
             if eos_id is not None and eos_id < vocab_size:
                 mask[:] = False
                 mask[eos_id] = True
 
-        # Force FROM if no FROM yet after enough steps
-        # Only force if we haven't already seen FROM
+        # Force FROM if needed
         if "from" not in partial_sql and self.t > 10:
-            from_token_ids = self.tokenizer.encode(
-                " from", add_special_tokens=False
-            )
-            # Don't zero the whole mask — just ensure FROM is allowed
-            # Zeroing caused entropy collapse by leaving only 1 valid token
+            from_token_ids = self.tokenizer.encode(" from", add_special_tokens=False)
             for tid in from_token_ids:
                 if tid < vocab_size:
                     mask[tid] = True
@@ -131,15 +131,17 @@ class TextToSQLEnv:
 
         # Handle grammar violation
         if not mask[action]:
-            return self.get_state(), -1.0, True, {"error": "invalid_action"}
-
+            # soft termination — no penalty, just end episode
+            # avoids punishing mask disagreement between collect and step
+            return self.get_state(), 0.0, True, {"error": "invalid_action"}
+        
         # Enforce SELECT as first token (T5-safe check)
         if self.t == 0:
             token_str = self.tokenizer.decode(
                 [action], skip_special_tokens=True
             ).lower().strip()
             if "select" not in token_str:
-                return self.get_state(), -1.0, True, {"error": "must_start_with_select"}
+                return self.get_state(), 0.0, True, {"error": "must_start_with_select"}
 
         # Apply action
         self.generated_tokens.append(int(action))
