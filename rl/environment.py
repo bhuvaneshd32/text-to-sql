@@ -103,7 +103,7 @@ class TextToSQLEnv:
         partial_sql = normalize_sql(self.decode_sql(self.generated_tokens))
 
         mask       = self.fsm.get_mask(partial_sql)
-        vocab_size = 32128  # T5 lm_head output size — larger than tokenizer.vocab_size
+        vocab_size = self.model.t5.config.vocab_size 
 
         # pad mask to actual tokenizer vocab size
         if mask.shape[0] < vocab_size:

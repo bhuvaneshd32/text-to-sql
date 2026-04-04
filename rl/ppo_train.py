@@ -48,13 +48,13 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────
 
 class ValueHead(nn.Module):
-    """Estimates V(s) from decoder's last hidden state [batch, 768]."""
-    def __init__(self, hidden_size: int = 768):
+    """Estimates V(s) from decoder's last hidden state [batch, d_model]."""
+    def __init__(self, hidden_size: int = 1024):  # 768 for t5-base, 1024 for t5-large
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Linear(256, 1)
         )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -224,7 +224,7 @@ def ppo_update(
     old_lps    = torch.tensor(all_old_lps,    device=device, dtype=torch.float32)
     advantages = torch.tensor(all_advantages, device=device, dtype=torch.float32)
     returns    = torch.tensor(all_returns,    device=device, dtype=torch.float32)
-    hiddens    = torch.stack(all_hiddens).to(device)   # [T, 768]
+    hiddens = torch.stack(all_hiddens).to(device)   # [T, d_model]  
 
     loss_log = []
 
@@ -284,13 +284,14 @@ def ppo_update(
 # NOT beam search — beam search measures SL quality, not RL policy
 # ─────────────────────────────────────────────────────────────────
 
-def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=150):
+def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=None):
     model.eval()
     ex_scores, f1_scores = [], []
 
     with torch.no_grad():
         for i, batch in enumerate(dev_loader):
-            if i >= n_batches:
+            # if i >= n_batches:
+            if n_batches is not None and i >= n_batches:    
                 break
 
             input_ids      = batch["input_ids"]
@@ -308,8 +309,9 @@ def evaluate_rl(model, dev_loader, tokenizer, device, db_dir, n_batches=150):
 
 
             pred_sql = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
-            gold_ids = [t for t in gold_sql_ids.tolist() if t >= 0]
-            gold_sql = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
+            gold_sql = batch["gold_sqls"][0] if "gold_sqls" in batch else \
+           tokenizer.decode([t for t in gold_sql_ids.tolist() if t >= 0],
+                            skip_special_tokens=True).strip()
             db_path  = os.path.join(db_dir, db_id, f"{db_id}.sqlite")
 
             ex_scores.append(exec_accuracy(pred_sql, gold_sql, db_path))
@@ -353,10 +355,16 @@ def train_ppo(args):
     # policy model — on device for gradient updates
     model = TextToSQLModel.load_for_rl(BEST_CHECKPOINT)
     model.to(device)
-    # print("=== BASELINE EXECUTION ACCURACY CHECK ===")
-    # baseline_scores = evaluate_rl(model, dev_loader, tokenizer, device, db_dir=DB_DIR, n_batches=150)
-    # print(f"Baseline exec_acc: {baseline_scores['exec_acc']*100:.2f}%")
-    # print(f"Baseline f1:       {baseline_scores['f1']*100:.2f}%")
+    print("=== BASELINE EXECUTION ACCURACY CHECK ===")
+    if args.eval_only:
+        print("=== EVAL ONLY MODE — no training ===", flush=True)
+        eval_scores = evaluate_rl(
+            model, dev_loader, tokenizer, device,
+            db_dir=DB_DIR, n_batches=None,   # full dev set — fair comparison
+        )
+        print(f"exec_acc: {eval_scores['exec_acc']*100:.2f}%", flush=True)
+        print(f"f1:       {eval_scores['f1']*100:.2f}%", flush=True)
+        return
 
     model.train()
     for p in model.t5.encoder.parameters():
@@ -529,5 +537,6 @@ if __name__ == "__main__":
     parser.add_argument("--gamma",          type=float, default=0.1)
     parser.add_argument("--delta",          type=float, default=0.3)
     parser.add_argument("--use_wandb",      action="store_true")
+    parser.add_argument("--eval_only", action="store_true")
     args = parser.parse_args()
     train_ppo(args)

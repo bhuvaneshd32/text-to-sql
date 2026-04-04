@@ -161,10 +161,19 @@ class TextToSQLModel(nn.Module):
     def load_for_rl(cls, path: str):
         """
         Load checkpoint for RL fine-tuning.
-        Noor calls this — same API as before.
+        Reads t5_model from the saved config so a t5-base checkpoint
+        loads into t5-base, and a t5-large checkpoint loads into t5-large.
+        This prevents the shape mismatch when the checkpoint was trained
+        on a different model size than the current default T5_MODEL.
         """
-        ckpt  = torch.load(path, map_location="cpu")
-        model = cls()
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+
+        # Read the backbone name from the checkpoint — fall back to current default
+        saved_config = ckpt.get("config", {})
+        t5_model = saved_config.get("t5_model", T5_MODEL)
+
+        print(f"  Checkpoint backbone: {t5_model}", flush=True)
+        model = cls(t5_model=t5_model)
         model.load_state_dict(ckpt["model_state_dict"])
         saved_ex = ckpt.get("dev_ex", 0.0)
         print(f"Loaded checkpoint from {path}", flush=True)
