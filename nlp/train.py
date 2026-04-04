@@ -113,7 +113,7 @@ def train(args):
 
     train_loader, dev_loader, schema_dict, tokenizer = build_dataloaders(
         TRAIN_JSON, DEV_JSON, TABLES_JSON,
-        tokenizer_name="t5-base",
+        tokenizer_name="t5-large",
         batch_size=args.batch_size,
         max_seq_len=512,
         max_sql_len=128,

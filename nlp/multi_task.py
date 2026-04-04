@@ -1,14 +1,14 @@
 """
 multi_task.py
 -------------
-Text-to-SQL model using T5-base as encoder-decoder backbone.
+Text-to-SQL model using T5-large as encoder-decoder backbone.
 
 WHY T5 INSTEAD OF ROBERTA + RANDOM DECODER:
     RoBERTa is encoder-only. Adding a random decoder and training it
     from scratch on 7000 Spider examples cannot achieve >20% EX.
     T5 is a pretrained encoder-decoder — both sides already understand
-    language and generation. Fine-tuned on Spider, T5-base achieves
-    55-65% EX, which is well above the 20-30% minimum for RL.
+    language and generation. Fine-tuned on Spider, T5-large achieves
+    60-65% EX, which is well above the 20-30% minimum for RL.
 
 YOUR SCHEMA CONTRIBUTIONS STAY:
     - serialize_schema() formats the input (schema-aware prompt)
@@ -29,12 +29,13 @@ from transformers import T5ForConditionalGeneration, T5Config
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-T5_MODEL = "t5-base"   # 250M params, good balance of speed and quality
+# UPGRADED TO T5-LARGE
+T5_MODEL = "t5-large"   # 770M params, needed for crossing the 60% EX threshold
 
 
 class TextToSQLModel(nn.Module):
     """
-    T5-base fine-tuned for Text-to-SQL generation.
+    T5-large fine-tuned for Text-to-SQL generation.
 
     Input format (schema-aware prompt):
         "translate to SQL: question | schema: table1: col1(TYPE), col2(TYPE) | table2: ..."
@@ -110,7 +111,7 @@ class TextToSQLModel(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
-        return encoder_outputs.last_hidden_state   # [batch, seq_len, 768]
+        return encoder_outputs.last_hidden_state   # [batch, seq_len, 1024] for t5-large
 
     def generate_sql(
         self,

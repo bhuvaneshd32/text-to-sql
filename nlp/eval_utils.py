@@ -12,6 +12,7 @@ CHANGES FROM V1:
     - Fixed show_samples AttributeError (added to argparse)
     - greedy_decode defined at module level so show_samples can call it
     - Updated evaluate_checkpoint for T5 to use model.generate_sql with beam search
+    - Updated tokenizer to t5-large
 
 TELL NOOR:
     from nlp.eval_utils import exec_accuracy, result_set_f1
@@ -275,7 +276,8 @@ def evaluate_checkpoint(
     from multi_task    import TextToSQLModel
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained("t5-base")
+    # UPGRADED TO T5-LARGE
+    tokenizer = AutoTokenizer.from_pretrained("t5-large")
 
     print(f"Loading checkpoint: {checkpoint_path}", flush=True)
     model = TextToSQLModel.load_for_rl(checkpoint_path)
@@ -436,7 +438,8 @@ if __name__ == "__main__":
         print("="*60, flush=True)
 
         device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        tokenizer = AutoTokenizer.from_pretrained("t5-base")
+        # UPGRADED TO T5-LARGE
+        tokenizer = AutoTokenizer.from_pretrained("t5-large")
         model     = TextToSQLModel.load_for_rl(args.checkpoint).to(device)
         model.eval()
 
