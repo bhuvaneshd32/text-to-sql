@@ -272,8 +272,8 @@ def evaluate_checkpoint(
                                alongside execution accuracy.
     """
     from transformers import AutoTokenizer
-    from data_pipeline import build_dataloaders
-    from multi_task    import TextToSQLModel
+    from nlp.data_pipeline import build_dataloaders
+    from nlp.multi_task    import TextToSQLModel
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # UPGRADED TO T5-LARGE
@@ -430,8 +430,8 @@ if __name__ == "__main__":
     # ── sample predictions ────────────────────────────────────────
     if args.show_samples:
         from transformers import AutoTokenizer
-        from data_pipeline import build_dataloaders
-        from multi_task    import TextToSQLModel
+        from nlp.data_pipeline import build_dataloaders
+        from nlp.multi_task    import TextToSQLModel
 
         print("\n" + "="*60, flush=True)
         print("Sample Predictions", flush=True)
