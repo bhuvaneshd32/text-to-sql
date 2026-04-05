@@ -443,33 +443,32 @@ def train_ppo(args):
             print(f"[SAMPLE ep{episode}] reward={reward:.2f} | pred='{pred_sql[:60]}'", flush=True)
 
         # ── POLICY GRADIENT UPDATE ───────────────────────────────
+        # clip BEFORE computing loss
+        clipped_advantage = float(np.clip(advantage, -1.0, 1.5))
+
         labels = sequences[:, 1:].clone()
         labels[labels == model.t5.config.pad_token_id] = -100
 
-        outputs = model.t5(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
-        policy_loss = advantage * outputs.loss
-        
-        policy_loss = torch.clamp(policy_loss, -0.5, 0.5)
-        reward = float(np.clip(reward, -1.0, 2.0))
-        advantage = float(np.clip(advantage, -2.0, 2.0))
-        # ── KL vs ref on CPU ─────────────────────────────────────
         with torch.no_grad():
             ref_out = ref_model.t5(
                 input_ids=input_ids.cpu(),
                 attention_mask=attention_mask.cpu(),
                 labels=sequences[:, 1:].clone().cpu(),
             )
-        kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
 
+        outputs = model.t5(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+
+        policy_loss = clipped_advantage * outputs.loss
+        kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
         loss = policy_loss + args.kl_coef * kl
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
 
         if episode % 10 == 0:
