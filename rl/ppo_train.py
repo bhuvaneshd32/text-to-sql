@@ -436,7 +436,9 @@ def train_ppo(args):
             gamma=args.gamma,
             delta=args.delta,
         )
-        reward_baseline = 0.9 * reward_baseline + 0.1 * reward
+        # reward_baseline = 0.9 * reward_baseline + 0.1 * reward
+        reward_baseline = 0.99 * reward_baseline + 0.01 * reward
+
         advantage       = reward - reward_baseline
 
         if episode <= 30:
@@ -444,7 +446,8 @@ def train_ppo(args):
 
         # ── POLICY GRADIENT UPDATE ───────────────────────────────
         # clip BEFORE computing loss
-        clipped_advantage = float(np.clip(advantage, -1.0, 1.5))
+        # clipped_advantage = float(np.clip(advantage, -1.0, 1.5))
+        clipped_advantage = float(np.clip(advantage, -3.0, 3.0))
 
         labels = sequences[:, 1:].clone()
         labels[labels == model.t5.config.pad_token_id] = -100
@@ -468,7 +471,8 @@ def train_ppo(args):
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
         if episode % 10 == 0:
