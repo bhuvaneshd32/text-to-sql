@@ -243,7 +243,7 @@ def train(args):
                 BEST_CHECKPOINT,
                 extra={
                     "config": {
-                        "t5_model": "t5-base", "max_sql_len": 128,
+                        "t5_model": "t5-large", "max_sql_len": 128,
                         "vocab_size": model.vocab_size,
                         "decoder_layers": 0, "decoder_ff_dim": 0, "decoder_heads": 0,
                     },
@@ -254,7 +254,7 @@ def train(args):
 
         model.save_checkpoint(
             LAST_CHECKPOINT,
-            extra={"config": {"t5_model": "t5-base"}, "epoch": epoch, "dev_ex": dev_ex}
+            extra={"config": {"t5_model": "t5-large"}, "epoch": epoch, "dev_ex": dev_ex}
         )
 
         print(f"{'─'*60}\n", flush=True)
