@@ -377,11 +377,14 @@ def train_ppo(args):
     for p in ref_model.parameters():
         p.requires_grad = False
 
-    optimizer = AdamW(
-        list(model.t5.decoder.parameters()) +
-        list(model.t5.lm_head.parameters()),
-        lr=args.lr, weight_decay=0.01
-    )
+    seen = set()
+    params = []
+    for p in list(model.t5.decoder.parameters()) + list(model.t5.lm_head.parameters()):
+        if id(p) not in seen and p.requires_grad:
+            seen.add(id(p))
+            params.append(p)
+
+    optimizer = AdamW(params, lr=args.lr, weight_decay=0.01)
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     best_exec_acc = 0.0
