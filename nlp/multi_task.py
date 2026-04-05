@@ -159,18 +159,24 @@ class TextToSQLModel(nn.Module):
 
     @classmethod
     def load_for_rl(cls, path: str):
-        """
-        Load checkpoint for RL fine-tuning.
-        Reads t5_model from the saved config so a t5-base checkpoint
-        loads into t5-base, and a t5-large checkpoint loads into t5-large.
-        This prevents the shape mismatch when the checkpoint was trained
-        on a different model size than the current default T5_MODEL.
-        """
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
-
-        # Read the backbone name from the checkpoint — fall back to current default
+        
         saved_config = ckpt.get("config", {})
         t5_model = saved_config.get("t5_model", T5_MODEL)
+
+        # Auto-detect actual model size from weight shapes —
+        # overrides whatever the config says, in case teammate saved
+        # t5-large weights but forgot to update the config string.
+        state = ckpt["model_state_dict"]
+        embed_shape = state.get("t5.shared.weight", state.get("t5.encoder.embed_tokens.weight"))
+        if embed_shape is not None:
+            d_model = embed_shape.shape[1]
+            if d_model == 1024 and "large" not in t5_model:
+                print(f"  [AUTO-DETECT] weights are t5-large (d_model=1024), overriding config '{t5_model}'", flush=True)
+                t5_model = "t5-large"
+            elif d_model == 768 and "large" in t5_model:
+                print(f"  [AUTO-DETECT] weights are t5-base (d_model=768), overriding config '{t5_model}'", flush=True)
+                t5_model = "t5-base"
 
         print(f"  Checkpoint backbone: {t5_model}", flush=True)
         model = cls(t5_model=t5_model)
