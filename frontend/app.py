@@ -2,8 +2,7 @@
 frontend/app.py
 ---------------
 Streamlit frontend for Text-to-SQL demo.
-Task 9: Query input + schema browser
-Task 10: Attention map visualization
+Includes SL vs RL model comparison and RL training dashboard.
 
 Run: streamlit run frontend/app.py
 """
@@ -20,11 +19,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import TABLES_JSON,API_URL
+from config import TABLES_JSON, API_URL
 from nlp.schema_utils import load_schema_dict, serialize_schema
-from transformers import AutoTokenizer
-from nlp.encoder import SchemaAwareEncoder
-from nlp.cross_attention import CrossAttentionSchemaLinker, build_alignment_map, build_schema_names
 
 # ─────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -43,22 +39,35 @@ st.set_page_config(
 @st.cache_resource
 def load_resources():
     schema_dict = load_schema_dict(TABLES_JSON)
-    tokenizer   = AutoTokenizer.from_pretrained("roberta-base")
-    encoder     = SchemaAwareEncoder()
-    linker      = CrossAttentionSchemaLinker()
-    encoder.eval()
-    linker.eval()
-    return schema_dict, tokenizer, encoder, linker
+    return schema_dict
 
-schema_dict, tokenizer, encoder, linker = load_resources()
+schema_dict = load_resources()
 
 # ─────────────────────────────────────────────────────────────────
-# SIDEBAR — schema browser
+# CHECK API + RL AVAILABILITY
+# ─────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=30)
+def check_api():
+    try:
+        r = requests.get(f"{API_URL}/health", timeout=3)
+        data = r.json()
+        return True, data.get("rl_available", False)
+    except Exception:
+        return False, False
+
+api_online, rl_available = check_api()
+
+# ─────────────────────────────────────────────────────────────────
+# SIDEBAR — schema browser + model selector
 # ─────────────────────────────────────────────────────────────────
 
 st.sidebar.title("🗄️ Schema Browser")
-db_ids  = sorted(schema_dict.keys())
-db_id   = st.sidebar.selectbox("Select database", db_ids, index=db_ids.index("perpetrator") if "perpetrator" in db_ids else 0)
+db_ids = sorted(schema_dict.keys())
+db_id  = st.sidebar.selectbox(
+    "Select database", db_ids,
+    index=db_ids.index("perpetrator") if "perpetrator" in db_ids else 0
+)
 
 entry   = schema_dict[db_id]
 tables  = entry["tables"]
@@ -71,12 +80,35 @@ for table in tables:
         for col in cols_for_table:
             st.sidebar.markdown(f"  • `{col}`")
 
+st.sidebar.markdown("---")
+st.sidebar.title("🤖 Model")
+
+# API status indicator
+if api_online:
+    st.sidebar.success("API online ✓")
+else:
+    st.sidebar.error("API offline — start inference_api.py")
+
+# Model selector
+model_options = ["SL (pretrained T5-large)"]
+if rl_available:
+    model_options.append("RL fine-tuned")
+    model_options.append("Compare SL vs RL")
+
+selected_model = st.sidebar.radio("Model to use", model_options)
+
+if not rl_available and api_online:
+    st.sidebar.info("RL checkpoint not found.\nRun RL training first:\n`python -m rl.ppo_train`")
+
 # ─────────────────────────────────────────────────────────────────
 # MAIN — query input
 # ─────────────────────────────────────────────────────────────────
 
 st.title("Text-to-SQL Demo")
-st.markdown(f"Database: **{db_id}**  |  Schema: `{serialize_schema(db_id, schema_dict)[:80]}...`")
+st.markdown(
+    f"Database: **{db_id}**  |  "
+    f"Schema: `{serialize_schema(db_id, schema_dict)[:80]}...`"
+)
 
 question = st.text_area(
     "Ask a question about the database:",
@@ -86,150 +118,183 @@ question = st.text_area(
 
 col1, col2 = st.columns([1, 4])
 with col1:
-    submit = st.button("Generate SQL", type="primary")
+    submit = st.button("Generate SQL", type="primary", disabled=not api_online)
 with col2:
-    show_heatmap = st.checkbox("Show attention heatmap")
+    show_heatmap = st.checkbox("Show attention heatmap", disabled=True,
+                               help="Attention heatmap requires RoBERTa encoder — disabled for T5")
 
 # ─────────────────────────────────────────────────────────────────
-# ON SUBMIT — call Noor's API or local model
+# HELPER — call API
+# ─────────────────────────────────────────────────────────────────
+
+def call_api(question, db_id, model="sl"):
+    resp = requests.post(
+        f"{API_URL}/predict",
+        json={"query": question, "db_id": db_id, "model": model},
+        timeout=30,
+    )
+    return resp.json()
+
+# ─────────────────────────────────────────────────────────────────
+# ON SUBMIT
 # ─────────────────────────────────────────────────────────────────
 
 if submit and question.strip():
     st.markdown("---")
 
-    # try Noor's /predict endpoint
-    try:
-        resp = requests.post(
-            f"{NOOR_API_URL}/predict",
-            json={"query": question, "db_id": db_id},
-            timeout=10,
-        )
-        data = resp.json()
-        pred_sql      = data.get("sql", "")
-        result_table  = data.get("result_table", [])
-        column_names  = data.get("column_names", [])
-        alignment_map = data.get("alignment_map", None)
-        api_used      = "Noor's RL model"
+    if "Compare" in selected_model:
+        # ── SIDE BY SIDE SL vs RL ─────────────────────────────────
+        st.subheader("SL vs RL Comparison")
 
-    except Exception as e:
-        st.warning(f"Noor's API not reachable ({e}). Showing attention map only.")
-        pred_sql     = "(API unavailable — run Noor's inference_api.py)"
-        result_table = []
-        column_names = []
-        alignment_map = None
-        api_used      = "local"
+        col_sl, col_rl = st.columns(2)
 
-    # display SQL
-    st.subheader("Generated SQL")
-    st.caption(f"Source: {api_used}")
-    st.code(pred_sql, language="sql")
+        with st.spinner("Generating from both models..."):
+            try:
+                sl_data = call_api(question, db_id, model="sl")
+                rl_data = call_api(question, db_id, model="rl")
+            except Exception as e:
+                st.error(f"API error: {e}")
+                st.stop()
 
-    # display result table
-    if result_table and column_names:
-        st.subheader("Query Results")
-        df = pd.DataFrame(result_table, columns=column_names)
-        st.dataframe(df, use_container_width=True)
-    elif result_table:
-        st.subheader("Query Results")
-        st.dataframe(pd.DataFrame(result_table), use_container_width=True)
-
-    # ── attention heatmap (Task 10) ───────────────────────────────
-    if show_heatmap:
-        st.subheader("Attention Map — Question → Schema")
-        st.caption("Darker = stronger attention. Shows which question words relate to which schema columns.")
-
-        with st.spinner("Computing attention..."):
-            schema_str = serialize_schema(db_id, schema_dict)
-            q_tokens   = tokenizer(question, add_special_tokens=False)["input_ids"]
-            q_len      = len(q_tokens)
-
-            encoding = tokenizer(
-                question, schema_str,
-                add_special_tokens=True,
-                max_length=512, truncation=True, padding="max_length",
-                return_tensors="pt",
-            )
-            input_ids      = encoding["input_ids"]
-            attention_mask = encoding["attention_mask"]
-            seq_len        = input_ids.shape[1]
-
-            token_type_ids = torch.zeros(1, seq_len, dtype=torch.long)
-            schema_start   = q_len + 2
-            for i in range(schema_start, seq_len):
-                if attention_mask[0, i] == 0:
-                    break
-                token_type_ids[0, i] = 1
-
-            with torch.no_grad():
-                outputs    = encoder.roberta(
-                    inputs_embeds=encoder.roberta.embeddings.word_embeddings(input_ids)
-                                  + encoder.type_embedding(token_type_ids),
-                    attention_mask=attention_mask,
+        with col_sl:
+            st.markdown("#### 🔵 SL Model (pretrained)")
+            st.code(sl_data.get("sql", ""), language="sql")
+            rows = sl_data.get("result_table", [])
+            cols = sl_data.get("column_names", [])
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows, columns=cols) if cols else pd.DataFrame(rows),
+                    use_container_width=True
                 )
-                all_hidden = outputs.last_hidden_state
-                H_q        = all_hidden[:, 1:q_len+1, :]
-                _, S_schema = encoder(input_ids, attention_mask, token_type_ids)[:2]
-                _, A, _    = linker(H_q, S_schema)
+            else:
+                st.info("No results returned.")
 
-            q_token_strings = tokenizer.convert_ids_to_tokens(
-                input_ids[0, 1:q_len+1].tolist()
-            )
-            q_token_strings = [t.lstrip("Ġ").lstrip("ġ") for t in q_token_strings]
-            schema_names    = build_schema_names(db_id, schema_dict)
+        with col_rl:
+            st.markdown("#### 🟢 RL Model (fine-tuned)")
+            st.code(rl_data.get("sql", ""), language="sql")
+            rows = rl_data.get("result_table", [])
+            cols = rl_data.get("column_names", [])
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows, columns=cols) if cols else pd.DataFrame(rows),
+                    use_container_width=True
+                )
+            else:
+                st.info("No results returned.")
 
-            A_np = A[0].detach().cpu().numpy()
-            n_q  = min(len(q_token_strings), A_np.shape[0])
-            n_s  = min(len(schema_names), A_np.shape[1], 30)  # cap at 30 schema cols
+        # highlight if they differ
+        if sl_data.get("sql", "").strip().lower() != rl_data.get("sql", "").strip().lower():
+            st.warning("⚡ SL and RL models generated different SQL — results may differ.")
+        else:
+            st.success("✓ Both models generated identical SQL.")
 
-            fig, ax = plt.subplots(figsize=(max(10, n_s * 0.5), max(4, n_q * 0.5)))
-            sns.heatmap(
-                A_np[:n_q, :n_s],
-                xticklabels=schema_names[:n_s],
-                yticklabels=q_token_strings[:n_q],
-                cmap="Blues",
-                ax=ax,
-                vmin=0, vmax=A_np[:n_q, :n_s].max(),
-            )
-            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
-            ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
-            ax.set_xlabel("Schema elements")
-            ax.set_ylabel("Question tokens")
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+    else:
+        # ── SINGLE MODEL ─────────────────────────────────────────
+        model_key = "rl" if "RL" in selected_model else "sl"
+        model_label = "🟢 RL fine-tuned" if model_key == "rl" else "🔵 SL pretrained"
+
+        try:
+            with st.spinner(f"Generating SQL with {model_label}..."):
+                data = call_api(question, db_id, model=model_key)
+        except Exception as e:
+            st.error(f"API error: {e}")
+            st.stop()
+
+        pred_sql     = data.get("sql", "")
+        result_table = data.get("result_table", [])
+        column_names = data.get("column_names", [])
+
+        st.subheader("Generated SQL")
+        st.caption(f"Model: {model_label}")
+        st.code(pred_sql, language="sql")
+
+        if result_table:
+            st.subheader("Query Results")
+            df = pd.DataFrame(result_table, columns=column_names) if column_names \
+                 else pd.DataFrame(result_table)
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("Query returned no results or failed to execute.")
 
 # ─────────────────────────────────────────────────────────────────
-# TRAINING DASHBOARD (reads training_log.json)
+# TRAINING DASHBOARD
 # ─────────────────────────────────────────────────────────────────
 
 st.markdown("---")
-st.subheader("Training Dashboard")
 
-log_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "nlp", "training_log.json"
-)
+tab_sl, tab_rl = st.tabs(["📈 SL Training", "🎯 RL Training"])
 
-if os.path.exists(log_path):
-    with open(log_path) as f:
-        log = json.load(f)
-    if log:
-        epochs  = [e["epoch"]      for e in log]
-        losses  = [e["train_loss"] for e in log]
-        dev_exs = [e["dev_ex"]     for e in log]
+# ── SL training log ───────────────────────────────────────────────
+with tab_sl:
+    sl_log_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "nlp", "training_log.json"
+    )
+    if os.path.exists(sl_log_path):
+        with open(sl_log_path) as f:
+            sl_log = json.load(f)
+        if sl_log:
+            epochs  = [e["epoch"]      for e in sl_log]
+            losses  = [e["train_loss"] for e in sl_log]
+            dev_exs = [e["dev_ex"]     for e in sl_log]
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.line_chart(pd.DataFrame({"train loss": losses}, index=epochs))
-            st.caption("Training loss per epoch")
-        with c2:
-            st.line_chart(pd.DataFrame({"dev exact match": dev_exs}, index=epochs))
-            st.caption("Dev exact match per epoch")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.line_chart(pd.DataFrame({"train loss": losses}, index=epochs))
+                st.caption("Training loss per epoch")
+            with c2:
+                st.line_chart(pd.DataFrame({"dev exact match": dev_exs}, index=epochs))
+                st.caption("Dev exact match per epoch")
 
-        latest = log[-1]
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Latest epoch",    latest["epoch"])
-        m2.metric("Train loss",      f"{latest['train_loss']:.4f}")
-        m3.metric("Dev exact match", f"{latest['dev_ex']*100:.1f}%")
-else:
-    st.info("training_log.json not found — run train.py first.")
+            latest = sl_log[-1]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Latest epoch",    latest["epoch"])
+            m2.metric("Train loss",      f"{latest['train_loss']:.4f}")
+            m3.metric("Dev exact match", f"{latest['dev_ex']*100:.1f}%")
+    else:
+        st.info("training_log.json not found — run nlp/train.py first.")
+
+# ── RL training log ───────────────────────────────────────────────
+with tab_rl:
+    rl_log_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "rl_training_log.json"
+    )
+    if os.path.exists(rl_log_path):
+        with open(rl_log_path) as f:
+            rl_log = json.load(f)
+        if rl_log:
+            episodes  = [e["episode"]  for e in rl_log]
+            rewards   = [e["reward"]   for e in rl_log]
+            exec_accs = [e["exec_acc"] * 100 for e in rl_log]
+            f1s       = [e["f1"]       * 100 for e in rl_log]
+            kls       = [e["kl"]       for e in rl_log]
+
+            # metrics over episodes
+            c1, c2 = st.columns(2)
+            with c1:
+                st.line_chart(pd.DataFrame({"exec_acc %": exec_accs, "f1 %": f1s},
+                                           index=episodes))
+                st.caption("Exec accuracy and F1 over RL episodes")
+            with c2:
+                st.line_chart(pd.DataFrame({"reward": rewards, "kl": kls},
+                                           index=episodes))
+                st.caption("Reward and KL divergence over RL episodes")
+
+            latest_rl = rl_log[-1]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Episodes trained", latest_rl["episode"])
+            m2.metric("Exec acc",  f"{latest_rl['exec_acc']*100:.2f}%")
+            m3.metric("F1",        f"{latest_rl['f1']*100:.2f}%")
+            m4.metric("KL",        f"{latest_rl['kl']:.4f}")
+
+            # SL vs RL comparison metrics
+            st.markdown("#### SL vs RL Baseline Comparison")
+            comp_data = {
+                "Model":    ["SL pretrained", "RL fine-tuned"],
+                "Exec Acc": ["33.75%", f"{latest_rl['exec_acc']*100:.2f}%"],
+                "F1":       ["34.80%", f"{latest_rl['f1']*100:.2f}%"],
+            }
+            st.table(pd.DataFrame(comp_data))
+    else:
+        st.info("rl_training_log.json not found — run rl/ppo_train.py first.")
