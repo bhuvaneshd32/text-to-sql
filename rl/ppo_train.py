@@ -555,12 +555,12 @@ def train_ppo(args):
             pred_ids = sequences[g][1:]
             pred_sql = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
             sql_tokens = tokenizer.encode(pred_sql, add_special_tokens=False)
-            r = compute_reward(
+            reward = compute_reward(
                 pred_sql=pred_sql, gold_sql=gold_sql, db_path=db_path,
                 sql_tokens=sql_tokens,
                 alpha=args.alpha, beta=args.beta, gamma=args.gamma, delta=args.delta,
             )
-            rewards.append(r)
+            rewards.append(reward)
 
         rewards_t = torch.tensor(rewards, dtype=torch.float32)
         mean_r    = rewards_t.mean()
