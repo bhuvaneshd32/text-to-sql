@@ -588,11 +588,11 @@ def train_ppo(args):
             )
 
             with torch.no_grad():
-                ref_out = ref_model.t5(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
+            ref_out = ref_model.t5(
+                input_ids=input_ids.cpu(),
+                attention_mask=attention_mask.cpu(),
+                labels=labels.cpu(),
+            )
 
             kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
             loss = adv * outputs.loss + args.kl_coef * kl
