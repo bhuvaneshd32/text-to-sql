@@ -449,12 +449,96 @@ def train_ppo(args):
         gold_sql       = tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
         db_path        = os.path.join(DB_DIR, db_id, f"{db_id}.sqlite")
 
-        # ── SAMPLE on GPU ────────────────────────────────────────
+        # # ── SAMPLE on GPU ────────────────────────────────────────
+        # model.eval()
+        # with torch.no_grad():
+        #     sample_out = model.t5.generate(
+        #         input_ids=input_ids,
+        #         attention_mask=attention_mask,
+        #         max_length=128,
+        #         do_sample=True,
+        #         temperature=args.temperature,
+        #         return_dict_in_generate=True,
+        #         output_scores=True,
+        #     )
+        # model.train()
+
+        # sequences = sample_out.sequences
+        # pred_ids  = sequences[0][1:]
+        # pred_sql  = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+
+        # # ── REWARD ───────────────────────────────────────────────
+        # sql_tokens = tokenizer.encode(pred_sql, add_special_tokens=False)
+        # reward = compute_reward(
+        #     pred_sql=pred_sql,
+        #     gold_sql=gold_sql,
+        #     db_path=db_path,
+        #     sql_tokens=sql_tokens,
+        #     alpha=args.alpha,
+        #     beta=args.beta,
+        #     gamma=args.gamma,
+        #     delta=args.delta,
+        # )
+        # # reward_baseline = 0.9 * reward_baseline + 0.1 * reward
+        # reward_baseline = 0.95 * reward_baseline + 0.05 * reward
+
+        # advantage       = reward - reward_baseline
+
+        # if episode <= 30:
+        #     print(f"[SAMPLE ep{episode}] reward={reward:.2f} | pred='{pred_sql[:60]}'", flush=True)
+
+        # # ── POLICY GRADIENT UPDATE ───────────────────────────────
+        # # clip BEFORE computing loss
+        # # clipped_advantage = float(np.clip(advantage, -1.0, 1.5))
+        # clipped_advantage = float(np.clip(advantage, -3.0, 3.0))
+
+        # labels = sequences[:, 1:].clone()
+        # labels[labels == model.t5.config.pad_token_id] = -100
+
+        # with torch.no_grad():
+        #     ref_out = ref_model.t5(
+        #         input_ids=input_ids.cpu(),
+        #         attention_mask=attention_mask.cpu(),
+        #         labels=sequences[:, 1:].clone().cpu(),
+        #     )
+
+        # outputs = model.t5(
+        #     input_ids=input_ids,
+        #     attention_mask=attention_mask,
+        #     labels=labels,
+        # )
+
+        # policy_loss = clipped_advantage * outputs.loss
+        # kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
+        # loss = policy_loss + args.kl_coef * kl
+
+        # optimizer.zero_grad()
+        # loss.backward()
+        # # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # optimizer.step()
+
+        # if episode % 10 == 0:
+        #     print(
+        #         f"Ep {episode:5d} | reward={reward:+.4f} | "
+        #         f"adv={advantage:+.4f} | loss={loss.item():.4f} | kl={kl:.4f}",
+        #         flush=True,
+        #     )
+
+
+        # attempt at grpo
+        G = args.group_size  # default 4
+
+        # inside the episode loop, replace the single generate + update with:
+
+        # ── SAMPLE G sequences ───────────────────────────────────────
         model.eval()
         with torch.no_grad():
+            input_ids_rep      = input_ids.repeat(G, 1)
+            attention_mask_rep = attention_mask.repeat(G, 1)
             sample_out = model.t5.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=input_ids_rep,
+                attention_mask=attention_mask_rep,
                 max_length=128,
                 do_sample=True,
                 temperature=args.temperature,
@@ -463,65 +547,70 @@ def train_ppo(args):
             )
         model.train()
 
-        sequences = sample_out.sequences
-        pred_ids  = sequences[0][1:]
-        pred_sql  = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+        sequences = sample_out.sequences   # [G, seq_len]
 
-        # ── REWARD ───────────────────────────────────────────────
-        sql_tokens = tokenizer.encode(pred_sql, add_special_tokens=False)
-        reward = compute_reward(
-            pred_sql=pred_sql,
-            gold_sql=gold_sql,
-            db_path=db_path,
-            sql_tokens=sql_tokens,
-            alpha=args.alpha,
-            beta=args.beta,
-            gamma=args.gamma,
-            delta=args.delta,
-        )
-        # reward_baseline = 0.9 * reward_baseline + 0.1 * reward
-        reward_baseline = 0.95 * reward_baseline + 0.05 * reward
+        # ── REWARDS for all G samples ─────────────────────────────────
+        rewards = []
+        for g in range(G):
+            pred_ids = sequences[g][1:]
+            pred_sql = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+            sql_tokens = tokenizer.encode(pred_sql, add_special_tokens=False)
+            r = compute_reward(
+                pred_sql=pred_sql, gold_sql=gold_sql, db_path=db_path,
+                sql_tokens=sql_tokens,
+                alpha=args.alpha, beta=args.beta, gamma=args.gamma, delta=args.delta,
+            )
+            rewards.append(r)
 
-        advantage       = reward - reward_baseline
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        mean_r    = rewards_t.mean()
+        std_r     = rewards_t.std() + 1e-8
+        advantages = (rewards_t - mean_r) / std_r   # [G] normalized
 
-        if episode <= 30:
-            print(f"[SAMPLE ep{episode}] reward={reward:.2f} | pred='{pred_sql[:60]}'", flush=True)
+        if episode <= 10:
+            print(f"[ep{episode}] rewards={[round(r,2) for r in rewards]} "
+                f"| gold='{gold_sql[:50]}'", flush=True)
 
-        # ── POLICY GRADIENT UPDATE ───────────────────────────────
-        # clip BEFORE computing loss
-        # clipped_advantage = float(np.clip(advantage, -1.0, 1.5))
-        clipped_advantage = float(np.clip(advantage, -3.0, 3.0))
+        # ── UPDATE on each sample weighted by advantage ───────────────
+        total_loss = 0.0
+        for g in range(G):
+            adv = advantages[g].item()
+            if abs(adv) < 1e-4:
+                continue   # no signal — skip
 
-        labels = sequences[:, 1:].clone()
-        labels[labels == model.t5.config.pad_token_id] = -100
+            labels = sequences[g:g+1, 1:].clone()
+            labels[labels == model.t5.config.pad_token_id] = -100
 
-        with torch.no_grad():
-            ref_out = ref_model.t5(
-                input_ids=input_ids.cpu(),
-                attention_mask=attention_mask.cpu(),
-                labels=sequences[:, 1:].clone().cpu(),
+            outputs = model.t5(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
             )
 
-        outputs = model.t5(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
+            with torch.no_grad():
+                ref_out = ref_model.t5(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
 
-        policy_loss = clipped_advantage * outputs.loss
-        kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
-        loss = policy_loss + args.kl_coef * kl
+            kl = max(0.0, outputs.loss.item() - ref_out.loss.item())
+            loss = adv * outputs.loss + args.kl_coef * kl
+            loss = loss / G
 
-        optimizer.zero_grad()
-        loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            optimizer.step()
+            total_loss += loss.item()
+
+        avg_reward = rewards_t.mean().item()
+        max_reward = rewards_t.max().item()
 
         if episode % 10 == 0:
             print(
-                f"Ep {episode:5d} | reward={reward:+.4f} | "
-                f"adv={advantage:+.4f} | loss={loss.item():.4f} | kl={kl:.4f}",
+                f"Ep {episode:5d} | avg_r={avg_reward:+.3f} | "
+                f"max_r={max_reward:+.3f} | loss={total_loss:.4f}",
                 flush=True,
             )
 
@@ -582,6 +671,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta",           type=float, default=0.5)
     parser.add_argument("--gamma",          type=float, default=0.1)
     parser.add_argument("--delta",          type=float, default=0.3)
+    parser.add_argument("--group_size", type=int, default=4) # for GRPO
     parser.add_argument("--use_wandb",      action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     args = parser.parse_args()
