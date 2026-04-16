@@ -3,21 +3,7 @@ multi_task.py
 -------------
 Text-to-SQL model using T5-large as encoder-decoder backbone.
 
-WHY T5 INSTEAD OF ROBERTA + RANDOM DECODER:
-    RoBERTa is encoder-only. Adding a random decoder and training it
-    from scratch on 7000 Spider examples cannot achieve >20% EX.
-    T5 is a pretrained encoder-decoder — both sides already understand
-    language and generation. Fine-tuned on Spider, T5-large achieves
-    60-65% EX, which is well above the 20-30% minimum for RL.
 
-YOUR SCHEMA CONTRIBUTIONS STAY:
-    - serialize_schema() formats the input (schema-aware prompt)
-    - grammar_fsm.py constrains decoding at every step
-    - cross_attention.py produces alignment maps for the demo
-    - data_pipeline.py loads Spider data unchanged
-
-NOOR'S CHECKPOINT FORMAT: unchanged.
-    load_for_rl(path) still works — same API.
 """
 
 import os

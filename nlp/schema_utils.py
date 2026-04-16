@@ -42,18 +42,6 @@ def serialize_schema(db_id: str, schema_dict: dict) -> str:
     """
     Convert a database schema into a flat string for encoder input.
 
-    WHY:
-        The encoder takes a single string as input. We need to flatten
-        the whole DB schema (multiple tables, each with multiple columns)
-        into one string that the tokenizer can handle.
-
-    Format:
-        "employees: id(INT), name(TEXT), salary(REAL) | departments: id(INT), dept_name(TEXT)"
-
-    Each table is separated by " | " so the model sees clear boundaries.
-    Column types are in parentheses so the model learns type-aware SQL generation
-    (e.g., don't wrap INT columns in quotes in WHERE clauses).
-
     Args:
         db_id:       the Spider database identifier, e.g. "company_1"
         schema_dict: the dict returned by load_schema_dict()
@@ -69,17 +57,9 @@ def serialize_schema(db_id: str, schema_dict: dict) -> str:
     tables = entry["tables"]
     columns = entry["columns"]   # list of [col_name, col_type]
 
-    # We need to know which columns belong to which table.
-    # We re-read tables.json grouping to do that — so we track table_idx per column.
-    # Here we use a simple approach: columns are stored in table order in Spider.
     # Build a mapping: table_name -> list of (col_name, col_type)
     table_col_map = {t: [] for t in tables}
 
-    # NOTE: Spider's column_names_original uses table_idx. We stored columns in
-    # order but lost table_idx in our simplified schema_dict. So we rebuild from raw.
-    # In production, store table_idx in schema_dict directly (improvement for later).
-    # For now, distribute columns evenly — this is approximate but works for a prototype.
-    # TODO Day 2: store table_idx per column in schema_dict for exact grouping.
     for col_name, col_type, t_idx in columns:
         table_name = tables[t_idx]
         table_col_map[table_name].append(f"{col_name}({col_type})")

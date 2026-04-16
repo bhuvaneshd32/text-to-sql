@@ -248,10 +248,6 @@ def tokenize_question_and_schema(
     }
 
 
-# ─────────────────────────────────────────────────────────────────
-# QUICK VERIFICATION TEST
-# Run: python encoder.py
-# ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
 
@@ -312,9 +308,3 @@ if __name__ == "__main__":
     assert Q_enc.shape[1] == 768, f"Expected 768, got {Q_enc.shape[1]}"
     assert all_hidden.shape[2] == 768, f"Expected 768, got {all_hidden.shape[2]}"
     print("✓ Encoder shape check passed.")
-
-    print("\n✓ All shapes correct. Task 1 encoder is working.")
-    print("\n--- Tell Noor ---")
-    print(f"Q_enc shape:    {list(Q_enc.shape)}   <- use for MDP state")
-    print(f"S_schema shape: {list(S_schema.shape)} <- use for schema cross-attention")
-    print("Schema tokens are in order: all cols of table1, then table2, etc.")

@@ -101,7 +101,6 @@ class SpiderDataset(Dataset):
             self.n_truncated += 1
 
         # ── tokenize target (gold SQL) ────────────────────────────
-        # Use text_target instead of the deprecated as_target_tokenizer()
         tgt = self.tokenizer(
             text_target=gold_sql,
             max_length=self.max_target_len,

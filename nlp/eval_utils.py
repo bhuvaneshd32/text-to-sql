@@ -2,21 +2,6 @@
 eval_utils.py
 -------------
 Shared evaluation utilities for Text-to-SQL.
-Used by Bhuvanesh for benchmarking and by Noor directly in her RL reward.
-
-CHANGES FROM V1:
-    - SQL normalisation before comparison (case, whitespace, quotes)
-      This is standard practice — Spider's official evaluator also normalises.
-      Prevents false negatives where pred and gold are semantically identical
-      but differ only in casing: "SELECT count(*)" vs "SELECT COUNT(*)"
-    - Fixed show_samples AttributeError (added to argparse)
-    - greedy_decode defined at module level so show_samples can call it
-    - Updated evaluate_checkpoint for T5 to use model.generate_sql with beam search
-    - Updated tokenizer to t5-large
-
-TELL NOOR:
-    from nlp.eval_utils import exec_accuracy, result_set_f1
-    Use these directly — do NOT rewrite them. Our metrics must match.
 """
 
 import os
@@ -41,20 +26,8 @@ def normalise_sql(sql: str) -> str:
     """
     Normalise SQL string before comparison.
 
-    WHAT WE NORMALISE:
-        1. Lowercase everything — SELECT == select
-        2. Collapse multiple spaces/newlines into single space
-        3. Strip leading/trailing whitespace
-        4. Normalise quotes — both ' and " treated the same
-        5. Remove spaces around parentheses — count( * ) == count(*)
-        6. Normalise common aliases and synonyms
-
-    WHY THIS IS VALID:
-        The Spider official evaluator (test-suite-sql-eval) performs similar
-        normalisation. Two SQL queries that differ only in casing or spacing
-        are semantically identical and should be scored as correct.
-        We are NOT changing the logic of the query — only surface formatting.
-
+    
+    
     Examples:
         "SELECT COUNT ( * ) FROM employees"
         → "select count(*) from employees"
@@ -118,15 +91,7 @@ def execute_sql(sql: str, db_path: str):
 
 
 def exec_accuracy(pred_sql: str, gold_sql: str, db_path: str) -> int:
-    """
-    Execution Accuracy — runs both SQLs on the DB, compares result sets.
-
-    Returns 1 if result sets match exactly, 0 otherwise.
-    Malformed SQL that fails to execute counts as 0.
-
-    Normalises SQL before execution to handle case/whitespace differences.
-    TELL NOOR: Use this directly in your R_exec reward computation.
-    """
+    
     pred_norm = normalise_sql(pred_sql)
     gold_norm = normalise_sql(gold_sql)
 
@@ -143,9 +108,6 @@ def result_set_f1(pred_sql: str, gold_sql: str, db_path: str) -> float:
     """
     Result-Set F1 — F1 between result sets treating rows as tokens.
     Gives partial credit for near-correct queries.
-
-    Returns float in [0, 1]. Failed execution = 0.0.
-    TELL NOOR: Use this directly in your R_sem reward computation.
     """
     pred_norm = normalise_sql(pred_sql)
     gold_norm = normalise_sql(gold_sql)
@@ -178,18 +140,9 @@ def result_set_f1(pred_sql: str, gold_sql: str, db_path: str) -> float:
 
 
 def string_match_accuracy(pred_sql: str, gold_sql: str) -> int:
-    """
-    Normalised string match — after normalisation, are the strings identical?
-    Faster proxy than execution accuracy (no DB needed).
-    Used during training for quick dev evaluation.
-    """
     return int(normalise_sql(pred_sql) == normalise_sql(gold_sql))
 
-
-# ─────────────────────────────────────────────────────────────────
 # GREEDY DECODE (module-level so show_samples can call it)
-# ─────────────────────────────────────────────────────────────────
-
 def greedy_decode(model, batch, tokenizer, max_len=128, device="cpu"):
     """
     Autoregressive greedy decode — feeds model's own output back in.
@@ -250,10 +203,6 @@ def greedy_decode(model, batch, tokenizer, max_len=128, device="cpu"):
     ]
 
 
-# ─────────────────────────────────────────────────────────────────
-# FULL EVALUATION RUN
-# ─────────────────────────────────────────────────────────────────
-
 def evaluate_checkpoint(
     checkpoint_path: str,
     dev_json:        str,
@@ -276,7 +225,6 @@ def evaluate_checkpoint(
     from nlp.multi_task    import TextToSQLModel
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # UPGRADED TO T5-LARGE
     tokenizer = AutoTokenizer.from_pretrained("t5-large")
 
     print(f"Loading checkpoint: {checkpoint_path}", flush=True)
@@ -401,10 +349,6 @@ def evaluate_checkpoint(
 
     return eval_results
 
-
-# ─────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Text-to-SQL checkpoint")
