@@ -93,7 +93,7 @@ else:
 model_options = ["SL (pretrained T5-large)"]
 if rl_available:
     model_options.append("RL fine-tuned")
-    model_options.append("Compare SL vs RL")
+    # model_options.append("Compare SL vs RL")
 
 selected_model = st.sidebar.radio("Model to use", model_options)
 
@@ -119,9 +119,9 @@ question = st.text_area(
 col1, col2 = st.columns([1, 4])
 with col1:
     submit = st.button("Generate SQL", type="primary", disabled=not api_online)
-with col2:
-    show_heatmap = st.checkbox("Show attention heatmap", disabled=True,
-                               help="Attention heatmap requires RoBERTa encoder — disabled for T5")
+# with col2:
+#     show_heatmap = st.checkbox("Show attention heatmap", disabled=True,
+#                                help="Attention heatmap requires RoBERTa encoder — disabled for T5")
 
 # ─────────────────────────────────────────────────────────────────
 # HELPER — call API
