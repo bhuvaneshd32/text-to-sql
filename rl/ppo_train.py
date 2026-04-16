@@ -529,8 +529,6 @@ def train_ppo(args):
         # attempt at grpo
         G = args.group_size  # default 4
 
-        # inside the episode loop, replace the single generate + update with:
-
         # ── SAMPLE G sequences ───────────────────────────────────────
         model.eval()
         with torch.no_grad():
