@@ -1,17 +1,3 @@
-"""
-data_pipeline.py
-----------------
-Spider dataset pipeline for T5-based Text-to-SQL.
-
-INPUT FORMAT (T5 prompt):
-    "translate to SQL: How many employees earn above 5000?
-     tables: employees ( id INT , name TEXT , salary REAL )"
-
-OUTPUT (label):
-    "SELECT count(*) FROM employees WHERE salary > 5000"
-
-T5's tokenizer handles BOS/EOS automatically — no manual addition needed.
-"""
 
 import json
 import os

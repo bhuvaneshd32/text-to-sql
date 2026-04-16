@@ -1,43 +1,10 @@
-"""
-schema_utils.py
----------------
-Utilities for loading and serializing database schemas from Spider's tables.json.
-
-KEY OUTPUTS:
-    schema_dict  — JSON-serializable Python dict, used by  MDP environment
-    serialize_schema() — converts a db_id to a string you can concatenate with the NL question
-
-    schema_dict format:
-    {
-        "employees": {
-            "tables":   ["employees", "departments"],
-            "columns":  [["id","INT"], ["name","TEXT"], ["salary","REAL"], ["dept_id","INT"]],
-            "types":    ["INT", "TEXT", "REAL", "INT"],
-            "fkeys":    [[3, 0]]   # col index 3 (dept_id) references col index 0 (id)
-        },
-        ...
-    }
-"""
 
 import json
 import os
 
 
 def load_schema_dict(tables_json_path: str) -> dict:
-    """
-    Parse Spider's tables.json into a clean schema_dict.
-
-    WHY:
-        Spider stores schema info in a nested JSON format. We flatten it into
-        a simple dict so both our encoder and Noor's MDP can easily look up
-        which tables/columns belong to a given db_id.
-
-    Args:
-        tables_json_path: path to Spider's tables.json file
-
-    Returns:
-        schema_dict: { db_id -> { tables, columns, types, fkeys } }
-    """
+    
     with open(tables_json_path, "r") as f:
         raw = json.load(f)
 
@@ -127,27 +94,7 @@ def serialize_schema(db_id: str, schema_dict: dict) -> str:
 
 
 def get_schema_token_to_column_map(db_id: str, schema_dict: dict, tokenizer) -> dict:
-    """
-    After tokenizing the schema string, build a mapping:
-        token_index_in_full_sequence -> column_index_in_schema_dict
-
-    WHY (tell Noor):
-        Noor's MDP state encoder needs to know which token positions correspond
-        to which schema elements. This map is what she uses to build S_schema
-        from the encoder hidden states.
-
-    Args:
-        db_id:       database identifier
-        schema_dict: the loaded schema dict
-        tokenizer:   HuggingFace tokenizer (must be initialized before calling)
-
-    Returns:
-        dict: { token_offset_in_schema_part -> column_index }
-
-    NOTE: This is a simplified version. A robust version needs to track
-          exact token offsets using tokenizer(return_offsets_mapping=True).
-          We will improve this in Task 3 during cross-attention setup.
-    """
+    
     schema_str = serialize_schema(db_id, schema_dict)
     # Tokenize just the schema portion to get its token count
     schema_tokens = tokenizer(schema_str, add_special_tokens=False)["input_ids"]

@@ -1,17 +1,3 @@
-"""
-train.py
---------
-T5 fine-tuning loop for Text-to-SQL.
-T5-base fine-tuned on Spider typically achieves 55-65% EX.
-With grammar FSM and schema-aware prompts: 65-75% EX.
-
-Run on Colab T4 GPU:
-    python train.py --epochs 15 --batch_size 16 --lr 3e-4
-
-Expected training time per epoch on T4: ~8-10 minutes
-Expected final EX: 55-70%
-"""
-
 import os, sys, json, time, random, argparse
 import numpy as np
 import torch
