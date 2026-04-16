@@ -41,7 +41,7 @@ tensorboard_logs/
 
 # ── Evaluation outputs (generated files, not source) ─────────────
 eval_results.json
-training_log.json
+# training_log.json
 
 # ── Jupyter ───────────────────────────────────────────────────────
 .ipynb_checkpoints/
@@ -57,5 +57,5 @@ Thumbs.db
 *.swp
 *.swo
 
-rl_training_log.json
+# rl_training_log.json
 text2sql_project_clean.zip
